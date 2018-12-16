@@ -15,16 +15,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.beam.sdk.schemas;
+package org.apache.beam.sdk.testing;
 
-import java.lang.reflect.Constructor;
-import org.apache.beam.sdk.schemas.utils.POJOUtils;
-
-/** Vends constructors for POJOs. */
-class PojoTypeUserTypeCreatorFactory implements UserTypeCreatorFactory {
-  @Override
-  public SchemaUserTypeCreator create(Class<?> clazz, Schema schema) {
-    Constructor<?> constructor = POJOUtils.getConstructor(clazz, schema);
-    return new SchemaUserTypeConstructorCreator(clazz, constructor);
-  }
-}
+/**
+ * Category tag for validation tests which use sideinputs. Tests tagged with {@link UsesSideInputs}
+ * should be run for runners which support sideinputs.
+ */
+public interface UsesSideInputs {}

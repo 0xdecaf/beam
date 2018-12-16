@@ -15,17 +15,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.beam.sdk.schemas.utils;
+package org.apache.beam.sdk.util;
 
-import java.util.List;
-import org.apache.beam.sdk.schemas.FieldValueSetter;
-import org.apache.beam.sdk.schemas.FieldValueSetterFactory;
-import org.apache.beam.sdk.schemas.Schema;
+import com.google.api.client.http.HttpResponse;
 
-/** A factory for creating {@link FieldValueSetter} objects for a POJO. */
-public class PojoValueSetterFactory implements FieldValueSetterFactory {
-  @Override
-  public List<FieldValueSetter> create(Class<?> targetClass, Schema schema) {
-    return POJOUtils.getSetters(targetClass, schema);
+/**
+ * These wrapper classes are necessary allow mocking out the HttpRequest and HttpResponse, since
+ * they are final classes and mockito cannot mock them. Note: There is an experimental mockito
+ * feature, but it causes many issues and several tests fail when it is enabled.
+ * https://stackoverflow.com/questions/14292863/how-to-mock-a-final-class-with-mockito
+ */
+class HttpResponseWrapper {
+  private HttpResponse response;
+
+  public HttpResponseWrapper(HttpResponse response) {
+    this.response = response;
+  }
+
+  public int getStatusCode() {
+    return response.getStatusCode();
   }
 }
