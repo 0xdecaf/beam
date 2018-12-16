@@ -53,7 +53,9 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.*;
+
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
@@ -447,7 +449,7 @@ public class ElasticsearchIO {
 
   /** A {@link PTransform} reading data from Elasticsearch. */
   @AutoValue
-  public abstract static class Read extends PTransform<PBegin, POutput> {
+  public abstract static class Read extends PTransform<PBegin, PCollection<String>> {
 
     private static final long MAX_BATCH_SIZE = 10000L;
 
@@ -549,7 +551,7 @@ public class ElasticsearchIO {
     }
 
     @Override
-    public POutput expand(PBegin input) {
+    public PCollection<String> expand(PBegin input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
 
@@ -716,6 +718,11 @@ public class ElasticsearchIO {
     public PCollection<String> expand(PCollection<ParameterT> input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
+
+      input.getPipeline();
+      // Alright, we don't know enough information to determine shards and
+      List<PCollection<String>> shards = new ArrayList<>();
+
       return input.apply(ParDo.of(new ElasticsearchReadFn<>(
               this.getConnectionConfiguration(),
               this.getQuery(),
@@ -737,7 +744,6 @@ public class ElasticsearchIO {
       getConnectionConfiguration().populateDisplayData(builder);
     }
   }
-
 
   private static class ElasticsearchReadFn<ParameterT> extends DoFn<ParameterT, String> {
     private final ConnectionConfiguration connectionConfiguration;
@@ -776,12 +782,47 @@ public class ElasticsearchIO {
       this.numSlices = numSlices;
       this.sliceId = sliceId;
     }
-    @ProcessElement
-    public void processElement(ProcessContext c) throws IOException {
+//    @GetInitialRestriction
+//    public OffsetRange getInitialRange(ParameterT element) {
+//      /* TODO: Execute tehe query but with a size parameter set to zero so we can get the number of records.
+//       * OR: The range is the number of shards or slices.
+//       * Maybe we can keep track of the number of records and shard count once we make the first query.
+//       * That all said, we're using a long running cursor for the processing of elements
+//       * And we want to ensure that the output doesn't create a hot bundle(window,key)
+//       * Each incoming query can be sent to a different worker.
+//       *
+//       * How can we split up the incoming work.  It's technically incremental so maybe we can just use the number of slices.
+//       */
+//
+//      return new OffsetRange(0L, element.getValue());
+//    }
+//    @SplitRestriction
+//    splitRestriction(ParameterT element, RestrictionT restriction, Backlog backlog, OutputReceiver<RestrictionT> receiver) {
+//
+//    }
+//    private static JsonNode getStats(
+//            ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+//      HashMap<String, String> params = new HashMap<>();
+//      if (shardLevel) {
+//        params.put("level", "shards");
+//      }
+//      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
+//      try (RestClient restClient = connectionConfiguration.createClient()) {
+//        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
+//      }
+//    }
+    private String getPreparedQuery(ProcessContext c) {
       String query = preparator == null ? queryTemplate : preparator.prepare(c.element(), queryTemplate);
       if (query == null) {
         query = "{\"query\": { \"match_all\": {} }}";
       }
+      return query;
+    }
+    @ProcessElement
+    public void processElement(ProcessContext c, OffsetRangeTracker tracker) throws IOException {
+
+      // We can use slices if > 5 for parallelization otherwise don't worry about it at all.
+      String query = getPreparedQuery(c);
       if ((backendVersion == 5 || backendVersion == 6)
               && numSlices != null
               && numSlices > 1) {
@@ -790,11 +831,60 @@ public class ElasticsearchIO {
                 String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
         query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
       }
+
+      JsonNode searchResult = executeSearchQuery(query);
+
+//      JsonNode hits = searchResult.path("hits").path("hits");
+
+      // Because this is a query that's able to be run multiple times we've kept track of where we are
+      // So we will check this first, then add the skip to the Elasticsearch query before completing.
+      //
+//      long startedAt = tracker.currentRestriction().getFrom();
+//      long currentOffset = startedAt;
+//
+//      // Convert to Java streams, just some nice syntactic sugar.
+//      StreamSupport
+//              .stream(hits.spliterator(), false)
+//              .skip(startedAt);
+
+
+      // TODO: We should also consider a separate output for aggregations
+      // TODO: Consider a function to transform each JSON before defining output (Remove OutputT <: String)
+      // TODO: Implement the same transformation for aggregation outputs.
+      /* We're going to scroll through the entire set of results.
+      *  This is different from the BoundedReader implementation in that if there is
+      *  a read failure, the entire bundle will be executed again.  If this does happen,
+      *  we want to remove the scroll
+      */
+
+//      // Now that we're ready to output results, we're going to use the fact that we still have elements
+//      while(hits.size() > 0) {
+//        for (JsonNode hit : hits) {
+//          if(isWithMetadata) {
+//            c.output(hit.toString());
+//          } else {
+//            String document = hit.path("_source").toString();
+//            c.output(document);
+//          }
+//        }
+//        // Execute the next range query and update hits.
+//      }
+
+      if (!outputResults(c, searchResult)) return;
+      updateScrollId(searchResult);
+      while(true) {
+        if (!advance(c)) break;
+      }
+
+    }
+
+    private JsonNode executeSearchQuery(String query) throws IOException {
       String endPoint =
               String.format(
                       "/%s/%s/_search",
                       connectionConfiguration.getIndex(),
                       connectionConfiguration.getType());
+
       Map<String, String> params = new HashMap<>();
       params.put("scroll", scrollKeepalive);
       if (backendVersion == 2) {
@@ -805,21 +895,9 @@ public class ElasticsearchIO {
       }
       HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
       Response response = restClient.performRequest("GET", endPoint, params, queryEntity);
-      JsonNode searchResult = parseResponse(response.getEntity());
-
-      /* We're going to scroll through the entire set of results.
-      *  This is different from the BoundedReader implementation in that if there is
-      *  a read failure, the entire bundle will be executed again.  If this does happen,
-      *  we want to remove the scroll
-      */
-      if (!outputResults(c, searchResult)) return;
-      // TODO: Continue the scroll until it's completed.
-      while(true){
-        if (!advance(c)) break;
-      }
-
-      updateScrollId(searchResult);
+      return parseResponse(response.getEntity());
     }
+
 
     private boolean outputResults(ProcessContext c, JsonNode searchResult) {
       JsonNode hits = searchResult.path("hits").path("hits");
@@ -853,7 +931,6 @@ public class ElasticsearchIO {
       return outputResults(c, searchResult);
 
     }
-    // TODO: Internalize into the function unless there is re-use.
     private void updateScrollId(JsonNode searchResult) {
       scrollId = searchResult.path("_scroll_id").asText();
     }
@@ -879,274 +956,273 @@ public class ElasticsearchIO {
   }
 
 
+  /** A {@link BoundedSource} reading from Elasticsearch. */
+  @VisibleForTesting
+  public static class BoundedElasticsearchSource extends BoundedSource<String> {
 
-//  /** A {@link BoundedSource} reading from Elasticsearch. */
-//  @VisibleForTesting
-//  public static class BoundedElasticsearchSource extends BoundedSource<String> {
-//
-//    private int backendVersion;
-//
-//    private final Read spec;
-//    // shardPreference is the shard id where the source will read the documents
-//    @Nullable private final String shardPreference;
-//    @Nullable private final Integer numSlices;
-//    @Nullable private final Integer sliceId;
-//
-//    //constructor used in split() when we know the backend version
-//    private BoundedElasticsearchSource(
-//        Read spec,
-//        @Nullable String shardPreference,
-//        @Nullable Integer numSlices,
-//        @Nullable Integer sliceId,
-//        int backendVersion) {
-//      this.backendVersion = backendVersion;
-//      this.spec = spec;
-//      this.shardPreference = shardPreference;
-//      this.numSlices = numSlices;
-//      this.sliceId = sliceId;
-//    }
-//
-//    @VisibleForTesting
-//    BoundedElasticsearchSource(
-//        Read spec,
-//        @Nullable String shardPreference,
-//        @Nullable Integer numSlices,
-//        @Nullable Integer sliceId) {
-//      this.spec = spec;
-//      this.shardPreference = shardPreference;
-//      this.numSlices = numSlices;
-//      this.sliceId = sliceId;
-//    }
-//
-//    @Override
-//    public List<? extends BoundedSource<String>> split(
-//        long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
-//      ConnectionConfiguration connectionConfiguration = spec.getConnectionConfiguration();
-//      this.backendVersion = getBackendVersion(connectionConfiguration);
-//      List<BoundedElasticsearchSource> sources = new ArrayList<>();
-//      if (backendVersion == 2) {
-//        // 1. We split per shard :
-//        // unfortunately, Elasticsearch 2.x doesn't provide a way to do parallel reads on a single
-//        // shard.So we do not use desiredBundleSize because we cannot split shards.
-//        // With the slice API in ES 5.x+ we will be able to use desiredBundleSize.
-//        // Basically we will just ask the slice API to return data
-//        // in nbBundles = estimatedSize / desiredBundleSize chuncks.
-//        // So each beam source will read around desiredBundleSize volume of data.
-//
-//        JsonNode statsJson = BoundedElasticsearchSource.getStats(connectionConfiguration, true);
-//        JsonNode shardsJson =
-//            statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
-//
-//        Iterator<Map.Entry<String, JsonNode>> shards = shardsJson.fields();
-//        while (shards.hasNext()) {
-//          Map.Entry<String, JsonNode> shardJson = shards.next();
-//          String shardId = shardJson.getKey();
-//          sources.add(new BoundedElasticsearchSource(spec, shardId, null, null, backendVersion));
-//        }
-//        checkArgument(!sources.isEmpty(), "No shard found");
-//      } else if (backendVersion == 5 || backendVersion == 6) {
-//        long indexSize = BoundedElasticsearchSource.estimateIndexSize(connectionConfiguration);
-//        float nbBundlesFloat = (float) indexSize / desiredBundleSizeBytes;
-//        int nbBundles = (int) Math.ceil(nbBundlesFloat);
-//        // ES slice api imposes that the number of slices is <= 1024 even if it can be overloaded
-//        if (nbBundles > 1024) {
-//          nbBundles = 1024;
-//        }
-//        // split the index into nbBundles chunks of desiredBundleSizeBytes by creating
-//        // nbBundles sources each reading a slice of the index
-//        // (see https://goo.gl/MhtSWz)
-//        // the slice API allows to split the ES shards
-//        // to have bundles closer to desiredBundleSizeBytes
-//        for (int i = 0; i < nbBundles; i++) {
-//          sources.add(new BoundedElasticsearchSource(spec, null, nbBundles, i, backendVersion));
-//        }
-//      }
-//      return sources;
-//    }
-//
-//    @Override
-//    public long getEstimatedSizeBytes(PipelineOptions options) throws IOException {
-//      return estimateIndexSize(spec.getConnectionConfiguration());
-//    }
-//
-//    @VisibleForTesting
-//    static long estimateIndexSize(ConnectionConfiguration connectionConfiguration)
-//        throws IOException {
-//      // we use indices stats API to estimate size and list the shards
-//      // (https://www.elastic.co/guide/en/elasticsearch/reference/2.4/indices-stats.html)
-//      // as Elasticsearch 2.x doesn't not support any way to do parallel read inside a shard
-//      // the estimated size bytes is not really used in the split into bundles.
-//      // However, we implement this method anyway as the runners can use it.
-//      // NB: Elasticsearch 5.x+ now provides the slice API.
-//      // (https://www.elastic.co/guide/en/elasticsearch/reference/5.0/search-request-scroll.html
-//      // #sliced-scroll)
-//      JsonNode statsJson = getStats(connectionConfiguration, false);
-//      JsonNode indexStats =
-//          statsJson.path("indices").path(connectionConfiguration.getIndex()).path("primaries");
-//      JsonNode store = indexStats.path("store");
-//      return store.path("size_in_bytes").asLong();
-//    }
-//
-//    @Override
-//    public void populateDisplayData(DisplayData.Builder builder) {
-//      spec.populateDisplayData(builder);
-//      builder.addIfNotNull(DisplayData.item("shard", shardPreference));
-//      builder.addIfNotNull(DisplayData.item("numSlices", numSlices));
-//      builder.addIfNotNull(DisplayData.item("sliceId", sliceId));
-//    }
-//
-//    @Override
-//    public BoundedReader<String> createReader(PipelineOptions options) {
-//      return new BoundedElasticsearchReader(this);
-//    }
-//
-//    @Override
-//    public void validate() {
-//      spec.validate(null);
-//    }
-//
-//    @Override
-//    public Coder<String> getOutputCoder() {
-//      return StringUtf8Coder.of();
-//    }
-//
-//    private static JsonNode getStats(
-//        ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
-//      HashMap<String, String> params = new HashMap<>();
-//      if (shardLevel) {
-//        params.put("level", "shards");
-//      }
-//      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
-//      try (RestClient restClient = connectionConfiguration.createClient()) {
-//        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
-//      }
-//    }
-//  }
-//
-//  private static class BoundedElasticsearchReader extends BoundedSource.BoundedReader<String> {
-//
-//    private final BoundedElasticsearchSource source;
-//
-//    private RestClient restClient;
-//    private String current;
-//    private String scrollId;
-//    private ListIterator<String> batchIterator;
-//
-//    private BoundedElasticsearchReader(BoundedElasticsearchSource source) {
-//      this.source = source;
-//    }
-//
-//    @Override
-//    public boolean start() throws IOException {
-//      restClient = source.spec.getConnectionConfiguration().createClient();
-//
-//      String query = source.spec.getQuery();
-//      if (query == null) {
-//        query = "{\"query\": { \"match_all\": {} }}";
-//      }
-//      if ((source.backendVersion == 5 || source.backendVersion == 6)
-//          && source.numSlices != null
-//          && source.numSlices > 1) {
-//        //if there is more than one slice, add the slice to the user query
-//        String sliceQuery =
-//            String.format("\"slice\": {\"id\": %s,\"max\": %s}", source.sliceId, source.numSlices);
-//        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
-//      }
-//      String endPoint =
-//          String.format(
-//              "/%s/%s/_search",
-//              source.spec.getConnectionConfiguration().getIndex(),
-//              source.spec.getConnectionConfiguration().getType());
-//      Map<String, String> params = new HashMap<>();
-//      params.put("scroll", source.spec.getScrollKeepalive());
-//      if (source.backendVersion == 2) {
-//        params.put("size", String.valueOf(source.spec.getBatchSize()));
-//        if (source.shardPreference != null) {
-//          params.put("preference", "_shards:" + source.shardPreference);
-//        }
-//      }
-//      HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
-//      Response response = restClient.performRequest("GET", endPoint, params, queryEntity);
-//      JsonNode searchResult = parseResponse(response.getEntity());
-//      updateScrollId(searchResult);
-//      return readNextBatchAndReturnFirstDocument(searchResult);
-//    }
-//
-//    private void updateScrollId(JsonNode searchResult) {
-//      scrollId = searchResult.path("_scroll_id").asText();
-//    }
-//
-//    @Override
-//    public boolean advance() throws IOException {
-//      if (batchIterator.hasNext()) {
-//        current = batchIterator.next();
-//        return true;
-//      } else {
-//        String requestBody =
-//            String.format(
-//                "{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}",
-//                source.spec.getScrollKeepalive(), scrollId);
-//        HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-//        Response response =
-//            restClient.performRequest(
-//                "GET", "/_search/scroll", Collections.emptyMap(), scrollEntity);
-//        JsonNode searchResult = parseResponse(response.getEntity());
-//        updateScrollId(searchResult);
-//        return readNextBatchAndReturnFirstDocument(searchResult);
-//      }
-//    }
-//
-//    private boolean readNextBatchAndReturnFirstDocument(JsonNode searchResult) {
-//      //stop if no more data
-//      JsonNode hits = searchResult.path("hits").path("hits");
-//      if (hits.size() == 0) {
-//        current = null;
-//        batchIterator = null;
-//        return false;
-//      }
-//      // list behind iterator is empty
-//      List<String> batch = new ArrayList<>();
-//      boolean withMetadata = source.spec.isWithMetadata();
-//      for (JsonNode hit : hits) {
-//        if (withMetadata) {
-//          batch.add(hit.toString());
-//        } else {
-//          String document = hit.path("_source").toString();
-//          batch.add(document);
-//        }
-//      }
-//      batchIterator = batch.listIterator();
-//      current = batchIterator.next();
-//      return true;
-//    }
-//
-//    @Override
-//    public String getCurrent() throws NoSuchElementException {
-//      if (current == null) {
-//        throw new NoSuchElementException();
-//      }
-//      return current;
-//    }
-//
-//    @Override
-//    public void close() throws IOException {
-//      // remove the scroll
-//      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
-//      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-//      try {
-//        restClient.performRequest("DELETE", "/_search/scroll", Collections.emptyMap(), entity);
-//      } finally {
-//        if (restClient != null) {
-//          restClient.close();
-//        }
-//      }
-//    }
-//
-//    @Override
-//    public BoundedSource<String> getCurrentSource() {
-//      return source;
-//    }
-//  }
+    private int backendVersion;
+
+    private final Read spec;
+    // shardPreference is the shard id where the source will read the documents
+    @Nullable private final String shardPreference;
+    @Nullable private final Integer numSlices;
+    @Nullable private final Integer sliceId;
+
+    //constructor used in split() when we know the backend version
+    private BoundedElasticsearchSource(
+        Read spec,
+        @Nullable String shardPreference,
+        @Nullable Integer numSlices,
+        @Nullable Integer sliceId,
+        int backendVersion) {
+      this.backendVersion = backendVersion;
+      this.spec = spec;
+      this.shardPreference = shardPreference;
+      this.numSlices = numSlices;
+      this.sliceId = sliceId;
+    }
+
+    @VisibleForTesting
+    BoundedElasticsearchSource(
+        Read spec,
+        @Nullable String shardPreference,
+        @Nullable Integer numSlices,
+        @Nullable Integer sliceId) {
+      this.spec = spec;
+      this.shardPreference = shardPreference;
+      this.numSlices = numSlices;
+      this.sliceId = sliceId;
+    }
+
+    @Override
+    public List<? extends BoundedSource<String>> split(
+        long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
+      ConnectionConfiguration connectionConfiguration = spec.getConnectionConfiguration();
+      this.backendVersion = getBackendVersion(connectionConfiguration);
+      List<BoundedElasticsearchSource> sources = new ArrayList<>();
+      if (backendVersion == 2) {
+        // 1. We split per shard :
+        // unfortunately, Elasticsearch 2.x doesn't provide a way to do parallel reads on a single
+        // shard.So we do not use desiredBundleSize because we cannot split shards.
+        // With the slice API in ES 5.x+ we will be able to use desiredBundleSize.
+        // Basically we will just ask the slice API to return data
+        // in nbBundles = estimatedSize / desiredBundleSize chuncks.
+        // So each beam source will read around desiredBundleSize volume of data.
+
+        JsonNode statsJson = BoundedElasticsearchSource.getStats(connectionConfiguration, true);
+        JsonNode shardsJson =
+            statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
+
+        Iterator<Map.Entry<String, JsonNode>> shards = shardsJson.fields();
+        while (shards.hasNext()) {
+          Map.Entry<String, JsonNode> shardJson = shards.next();
+          String shardId = shardJson.getKey();
+          sources.add(new BoundedElasticsearchSource(spec, shardId, null, null, backendVersion));
+        }
+        checkArgument(!sources.isEmpty(), "No shard found");
+      } else if (backendVersion == 5 || backendVersion == 6) {
+        long indexSize = BoundedElasticsearchSource.estimateIndexSize(connectionConfiguration);
+        float nbBundlesFloat = (float) indexSize / desiredBundleSizeBytes;
+        int nbBundles = (int) Math.ceil(nbBundlesFloat);
+        // ES slice api imposes that the number of slices is <= 1024 even if it can be overloaded
+        if (nbBundles > 1024) {
+          nbBundles = 1024;
+        }
+        // split the index into nbBundles chunks of desiredBundleSizeBytes by creating
+        // nbBundles sources each reading a slice of the index
+        // (see https://goo.gl/MhtSWz)
+        // the slice API allows to split the ES shards
+        // to have bundles closer to desiredBundleSizeBytes
+        for (int i = 0; i < nbBundles; i++) {
+          sources.add(new BoundedElasticsearchSource(spec, null, nbBundles, i, backendVersion));
+        }
+      }
+      return sources;
+    }
+
+    @Override
+    public long getEstimatedSizeBytes(PipelineOptions options) throws IOException {
+      return estimateIndexSize(spec.getConnectionConfiguration());
+    }
+
+    @VisibleForTesting
+    static long estimateIndexSize(ConnectionConfiguration connectionConfiguration)
+        throws IOException {
+      // we use indices stats API to estimate size and list the shards
+      // (https://www.elastic.co/guide/en/elasticsearch/reference/2.4/indices-stats.html)
+      // as Elasticsearch 2.x doesn't not support any way to do parallel read inside a shard
+      // the estimated size bytes is not really used in the split into bundles.
+      // However, we implement this method anyway as the runners can use it.
+      // NB: Elasticsearch 5.x+ now provides the slice API.
+      // (https://www.elastic.co/guide/en/elasticsearch/reference/5.0/search-request-scroll.html
+      // #sliced-scroll)
+      JsonNode statsJson = getStats(connectionConfiguration, false);
+      JsonNode indexStats =
+          statsJson.path("indices").path(connectionConfiguration.getIndex()).path("primaries");
+      JsonNode store = indexStats.path("store");
+      return store.path("size_in_bytes").asLong();
+    }
+
+    @Override
+    public void populateDisplayData(DisplayData.Builder builder) {
+      spec.populateDisplayData(builder);
+      builder.addIfNotNull(DisplayData.item("shard", shardPreference));
+      builder.addIfNotNull(DisplayData.item("numSlices", numSlices));
+      builder.addIfNotNull(DisplayData.item("sliceId", sliceId));
+    }
+
+    @Override
+    public BoundedReader<String> createReader(PipelineOptions options) {
+      return new BoundedElasticsearchReader(this);
+    }
+
+    @Override
+    public void validate() {
+      spec.validate(null);
+    }
+
+    @Override
+    public Coder<String> getOutputCoder() {
+      return StringUtf8Coder.of();
+    }
+
+    private static JsonNode getStats(
+        ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+      HashMap<String, String> params = new HashMap<>();
+      if (shardLevel) {
+        params.put("level", "shards");
+      }
+      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
+      try (RestClient restClient = connectionConfiguration.createClient()) {
+        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
+      }
+    }
+  }
+
+  private static class BoundedElasticsearchReader extends BoundedSource.BoundedReader<String> {
+
+    private final BoundedElasticsearchSource source;
+
+    private RestClient restClient;
+    private String current;
+    private String scrollId;
+    private ListIterator<String> batchIterator;
+
+    private BoundedElasticsearchReader(BoundedElasticsearchSource source) {
+      this.source = source;
+    }
+
+    @Override
+    public boolean start() throws IOException {
+      restClient = source.spec.getConnectionConfiguration().createClient();
+
+      String query = source.spec.getQuery();
+      if (query == null) {
+        query = "{\"query\": { \"match_all\": {} }}";
+      }
+      if ((source.backendVersion == 5 || source.backendVersion == 6)
+          && source.numSlices != null
+          && source.numSlices > 1) {
+        //if there is more than one slice, add the slice to the user query
+        String sliceQuery =
+            String.format("\"slice\": {\"id\": %s,\"max\": %s}", source.sliceId, source.numSlices);
+        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
+      }
+      String endPoint =
+          String.format(
+              "/%s/%s/_search",
+              source.spec.getConnectionConfiguration().getIndex(),
+              source.spec.getConnectionConfiguration().getType());
+      Map<String, String> params = new HashMap<>();
+      params.put("scroll", source.spec.getScrollKeepalive());
+      if (source.backendVersion == 2) {
+        params.put("size", String.valueOf(source.spec.getBatchSize()));
+        if (source.shardPreference != null) {
+          params.put("preference", "_shards:" + source.shardPreference);
+        }
+      }
+      HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
+      Response response = restClient.performRequest("GET", endPoint, params, queryEntity);
+      JsonNode searchResult = parseResponse(response.getEntity());
+      updateScrollId(searchResult);
+      return readNextBatchAndReturnFirstDocument(searchResult);
+    }
+
+    private void updateScrollId(JsonNode searchResult) {
+      scrollId = searchResult.path("_scroll_id").asText();
+    }
+
+    @Override
+    public boolean advance() throws IOException {
+      if (batchIterator.hasNext()) {
+        current = batchIterator.next();
+        return true;
+      } else {
+        String requestBody =
+            String.format(
+                "{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}",
+                source.spec.getScrollKeepalive(), scrollId);
+        HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+        Response response =
+            restClient.performRequest(
+                "GET", "/_search/scroll", Collections.emptyMap(), scrollEntity);
+        JsonNode searchResult = parseResponse(response.getEntity());
+        updateScrollId(searchResult);
+        return readNextBatchAndReturnFirstDocument(searchResult);
+      }
+    }
+
+    private boolean readNextBatchAndReturnFirstDocument(JsonNode searchResult) {
+      //stop if no more data
+      JsonNode hits = searchResult.path("hits").path("hits");
+      if (hits.size() == 0) {
+        current = null;
+        batchIterator = null;
+        return false;
+      }
+      // list behind iterator is empty
+      List<String> batch = new ArrayList<>();
+      boolean withMetadata = source.spec.isWithMetadata();
+      for (JsonNode hit : hits) {
+        if (withMetadata) {
+          batch.add(hit.toString());
+        } else {
+          String document = hit.path("_source").toString();
+          batch.add(document);
+        }
+      }
+      batchIterator = batch.listIterator();
+      current = batchIterator.next();
+      return true;
+    }
+
+    @Override
+    public String getCurrent() throws NoSuchElementException {
+      if (current == null) {
+        throw new NoSuchElementException();
+      }
+      return current;
+    }
+
+    @Override
+    public void close() throws IOException {
+      // remove the scroll
+      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
+      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      try {
+        restClient.performRequest("DELETE", "/_search/scroll", Collections.emptyMap(), entity);
+      } finally {
+        if (restClient != null) {
+          restClient.close();
+        }
+      }
+    }
+
+    @Override
+    public BoundedSource<String> getCurrentSource() {
+      return source;
+    }
+  }
   /**
    * A POJO encapsulating a configuration for retry behavior when issuing requests to ES. A retry
    * will be attempted until the maxAttempts or maxDuration is exceeded, whichever comes first, for
