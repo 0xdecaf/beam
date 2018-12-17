@@ -24,7 +24,10 @@ import static org.apache.beam.sdk.io.elasticsearch.ElasticsearchIOTestCommon.get
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.ServerSocket;
+import org.apache.beam.sdk.coders.DurationCoder;
+import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.node.Node;
@@ -128,6 +131,22 @@ public class ElasticsearchIOTest implements Serializable {
   public void testRead() throws Exception {
     elasticsearchIOTestCommon.setPipeline(pipeline);
     elasticsearchIOTestCommon.testRead();
+  }
+
+  @Test
+  public void testReadAll() throws Exception {
+    elasticsearchIOTestCommon.setPipeline(pipeline);
+    elasticsearchIOTestCommon.testReadAll();
+  }
+
+  @Test
+  public void testIntervalWindow_GetCoder_protobuf_failure() throws Exception {
+
+    IntervalWindow.IntervalWindowCoder coder = new IntervalWindow.IntervalWindowCoder();
+    InstantCoder.of();
+    DurationCoder.of();
+    IntervalWindow.IntervalWindowCoder.of();
+    IntervalWindow.getCoder();
   }
 
   @Test
