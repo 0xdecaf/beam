@@ -52,16 +52,20 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.BoundedSource;
-import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.sdk.values.*;
+import org.apache.beam.sdk.values.PBegin;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PDone;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -560,27 +564,26 @@ public class ElasticsearchIO {
       // return input
       //         .apply(org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null, null, null)));
 
-      if(getQuery() == null) {
+      if (getQuery() == null) {
         return input
-                .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
-                .apply(
-                  ElasticsearchIO.<Void>readAll()
+            .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
+            .apply(
+                ElasticsearchIO.<Void>readAll()
                     .withConnectionConfiguration(getConnectionConfiguration())
                     .withBatchSize(getBatchSize())
                     .withMetadata(isWithMetadata())
                     .withScrollKeepalive(getScrollKeepalive()));
       } else {
         return input
-                .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
-                .apply(
-                  ElasticsearchIO.<Void>readAll()
+            .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
+            .apply(
+                ElasticsearchIO.<Void>readAll()
                     .withConnectionConfiguration(getConnectionConfiguration())
                     .withQuery(getQuery())
                     .withBatchSize(getBatchSize())
                     .withMetadata(isWithMetadata())
                     .withScrollKeepalive(getScrollKeepalive()));
       }
-
     }
 
     @Override
@@ -594,20 +597,20 @@ public class ElasticsearchIO {
     }
   }
 
+  /**
+   * Defines a callback which allows the user to update the query for each incoming element.
+   *
+   * @param <ParameterT>
+   */
+  @FunctionalInterface
+  public interface QueryPreparator<ParameterT> extends Serializable {
+    String prepare(ParameterT element, String query);
+  }
+
   /** A {@link PTransform} reading data from Elasticsearch. */
   @AutoValue
   public abstract static class ReadAll<ParameterT>
       extends PTransform<PCollection<ParameterT>, PCollection<String>> {
-
-    /**
-     * An interface used by the JdbcIO
-     *
-     * @param <ParameterT>
-     */
-    @FunctionalInterface
-    public interface QueryPreparator<ParameterT> extends Serializable {
-      String prepare(ParameterT element, String query);
-    }
 
     private static final long MAX_BATCH_SIZE = 10000L;
 
@@ -696,6 +699,7 @@ public class ElasticsearchIO {
     /**
      * Include metadata in result json documents. Document source will be under json node _source.
      *
+     * @param metadata should document metadata be returned with results
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
     public ReadAll<ParameterT> withMetadata(boolean metadata) {
@@ -740,10 +744,6 @@ public class ElasticsearchIO {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
 
-      input.getPipeline();
-      // Alright, we don't know enough information to determine shards and
-      List<PCollection<String>> shards = new ArrayList<>();
-
       return input
           .apply(
               ParDo.of(
@@ -777,7 +777,7 @@ public class ElasticsearchIO {
     private final boolean isWithMetadata;
     private final long batchSize;
     private final String scrollKeepalive;
-    private final ReadAll.QueryPreparator<ParameterT> preparator;
+    private final QueryPreparator<ParameterT> preparator;
 
     @Nullable private final String shardPreference;
     @Nullable private final Integer numSlices;
@@ -793,7 +793,7 @@ public class ElasticsearchIO {
         boolean isWithMetadata,
         long batchSize,
         String scrollKeepalive,
-        ReadAll.QueryPreparator<ParameterT> preparator,
+        QueryPreparator<ParameterT> preparator,
         @Nullable String shardPreference,
         @Nullable Integer numSlices,
         @Nullable Integer sliceId) {
@@ -895,10 +895,14 @@ public class ElasticsearchIO {
       //        // Execute the next range query and update hits.
       //      }
 
-      if (!outputResults(c, searchResult)) return;
+      if (!outputResults(c, searchResult)) {
+        return;
+      }
       updateScrollId(searchResult);
       while (true) {
-        if (!advance(c)) break;
+        if (!advance(c)) {
+          break;
+        }
       }
     }
 
