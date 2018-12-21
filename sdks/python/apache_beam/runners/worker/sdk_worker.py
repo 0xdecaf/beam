@@ -56,10 +56,10 @@ class SdkHarness(object):
     self._worker_index = 0
     self._worker_id = worker_id
     if credentials is None:
-      logging.info('Creating insecure control channel.')
+      logging.info('Creating insecure control channel for %s.', control_address)
       self._control_channel = grpc.insecure_channel(control_address)
     else:
-      logging.info('Creating secure control channel.')
+      logging.info('Creating secure control channel for %s.', control_address)
       self._control_channel = grpc.secure_channel(control_address, credentials)
     grpc.channel_ready_future(self._control_channel).result(timeout=60)
     logging.info('Control channel established.')
@@ -79,7 +79,6 @@ class SdkHarness(object):
     self._progress_thread_pool = futures.ThreadPoolExecutor(max_workers=1)
     self._process_thread_pool = futures.ThreadPoolExecutor(
         max_workers=self._worker_count)
-    self._monitoring_thread_pool = futures.ThreadPoolExecutor(max_workers=1)
     self._instruction_id_vs_worker = {}
     self._fns = {}
     self._responses = queue.Queue()
@@ -108,8 +107,6 @@ class SdkHarness(object):
               fns=self._fns,
               profiler_factory=self._profiler_factory))
 
-    self._monitoring_thread_pool.submit(self._monitor_process_bundle)
-
     def get_responses():
       while True:
         response = self._responses.get()
@@ -117,21 +114,27 @@ class SdkHarness(object):
           return
         yield response
 
-    for work_request in control_stub.Control(get_responses()):
-      logging.debug('Got work %s', work_request.instruction_id)
-      request_type = work_request.WhichOneof('request')
-      # Name spacing the request method with 'request_'. The called method
-      # will be like self.request_register(request)
-      getattr(self, SdkHarness.REQUEST_METHOD_PREFIX + request_type)(
-          work_request)
+    self._alive = True
+    monitoring_thread = threading.Thread(target=self._monitor_process_bundle)
+    monitoring_thread.daemon = True
+    monitoring_thread.start()
+
+    try:
+      for work_request in control_stub.Control(get_responses()):
+        logging.debug('Got work %s', work_request.instruction_id)
+        request_type = work_request.WhichOneof('request')
+        # Name spacing the request method with 'request_'. The called method
+        # will be like self.request_register(request)
+        getattr(self, SdkHarness.REQUEST_METHOD_PREFIX + request_type)(
+            work_request)
+    finally:
+      self._alive = False
 
     logging.info('No more requests from control plane')
     logging.info('SDK Harness waiting for in-flight requests to complete')
-    self._alive = False
     # Wait until existing requests are processed.
     self._progress_thread_pool.shutdown()
     self._process_thread_pool.shutdown()
-    self._monitoring_thread_pool.shutdown(wait=False)
     # get_responses may be blocked on responses.get(), but we need to return
     # control to its caller.
     self._responses.put(no_more_work)
@@ -351,7 +354,7 @@ class GrpcStateHandlerFactory(StateHandlerFactory):
     if url not in self._state_handler_cache:
       with self._lock:
         if url not in self._state_handler_cache:
-          logging.info('Creating channel for %s', url)
+          logging.info('Creating insecure state channel for %s', url)
           grpc_channel = grpc.insecure_channel(
               url,
               # Options to have no limits (-1) on the size of the messages
@@ -359,6 +362,7 @@ class GrpcStateHandlerFactory(StateHandlerFactory):
               # controlled in a layer above.
               options=[("grpc.max_receive_message_length", -1),
                        ("grpc.max_send_message_length", -1)])
+          logging.info('State channel established.')
           # Add workerId to the grpc channel
           grpc_channel = grpc.intercept_channel(grpc_channel,
                                                 WorkerIdInterceptor())
@@ -450,14 +454,13 @@ class GrpcStateHandler(object):
     self._done = True
     self._requests.put(self._DONE)
 
-  def blocking_get(self, state_key):
+  def blocking_get(self, state_key, continuation_token=None):
     response = self._blocking_request(
         beam_fn_api_pb2.StateRequest(
             state_key=state_key,
-            get=beam_fn_api_pb2.StateGetRequest()))
-    if response.get.continuation_token:
-      raise NotImplementedError
-    return response.get.data
+            get=beam_fn_api_pb2.StateGetRequest(
+                continuation_token=continuation_token)))
+    return response.get.data, response.get.continuation_token
 
   def blocking_append(self, state_key, data):
     self._blocking_request(

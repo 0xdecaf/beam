@@ -15,14 +15,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.beam.runners.flink;
+package org.apache.beam.runners.dataflow.util;
 
-/** The translation mode of the Beam Pipeline. */
-enum TranslationMode {
+import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
+import org.apache.beam.sdk.io.FileSystems;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 
-  /** Uses the batch mode of Flink. */
-  BATCH,
-
-  /** Uses the streaming mode of Flink. */
-  STREAMING
+/** Standalone program to upload files to GCS, for testing in isolation. */
+public class GCSUploadMain {
+  public static void main(String[] args) {
+    DataflowPipelineOptions options =
+        PipelineOptionsFactory.fromArgs(args).as(DataflowPipelineOptions.class);
+    FileSystems.setDefaultPipelineOptions(options);
+    GcsStager stager = GcsStager.fromOptions(options);
+    stager.stageFiles(options.getFilesToStage());
+  }
 }
