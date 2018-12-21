@@ -211,19 +211,20 @@ class ElasticsearchIOTestCommon implements Serializable {
 
     PCollection<String> output =
       pipeline
-        .apply(Create.of("Einstein" , "Darwin"))
-        .apply(
-          ElasticsearchIO.<String>readAll() // Why do we need to specify the input element type?
-            .withConnectionConfiguration(connectionConfiguration)
-            //set to default value, useful just to test parameter passing.
-            .withScrollKeepalive("5m")
-            //set to default value, useful just to test parameter passing.
-            .withBatchSize(100L)
-            .withQuery(queryTemplate)
-            .withQueryPreparator((ElasticsearchIO.QueryPreparator<String>) (element, query) -> query.replace("${scientist}", element))
-        );
+          .apply(Create.of("Einstein" , "Darwin"))
+          .apply(
+              ElasticsearchIO.<String>readAll() // Why do we need to specify the input element type?
+                .withConnectionConfiguration(connectionConfiguration)
+                //set to default value, useful just to test parameter passing.
+                .withScrollKeepalive("5m")
+                //set to default value, useful just to test parameter passing.
+                .withBatchSize(100L)
+                .withQuery(queryTemplate)
+                .withQueryPreparator((ElasticsearchIO.QueryPreparator<String>) (element, query) -> query.replace("${scientist}", element))
+          );
 
-    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo((numDocs/NUM_SCIENTISTS) * 2);
+    PAssert.thatSingleton(output.apply("Count", Count.globally()))
+        .isEqualTo((numDocs/NUM_SCIENTISTS) * 2);
     pipeline.run();
   }
 

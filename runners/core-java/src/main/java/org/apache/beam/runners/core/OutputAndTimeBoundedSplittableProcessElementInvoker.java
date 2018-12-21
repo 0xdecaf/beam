@@ -272,6 +272,7 @@ public class OutputAndTimeBoundedSplittableProcessElementInvoker<
   private class ProcessContext extends DoFn<InputT, OutputT>.ProcessContext
       implements RestrictionTrackers.ClaimObserver<PositionT> {
     private final WindowedValue<InputT> element;
+
     private final RestrictionTracker<RestrictionT, PositionT> tracker;
     private int numClaimedBlocks;
     private boolean hasClaimFailed;

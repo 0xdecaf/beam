@@ -27,6 +27,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Iterators;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -52,13 +53,18 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.BoundedSource;
+import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.state.StateSpec;
+import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.splittabledofn.Backlog;
+import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
@@ -755,7 +761,6 @@ public class ElasticsearchIO {
                       this.getScrollKeepalive(),
                       this.getQueryPreparator(),
                       null,
-                      null,
                       null)))
           .setCoder(StringUtf8Coder.of());
     }
@@ -780,11 +785,27 @@ public class ElasticsearchIO {
     private final QueryPreparator<ParameterT> preparator;
 
     @Nullable private final String shardPreference;
-    @Nullable private final Integer numSlices;
-    @Nullable private final Integer sliceId;
+    @Nullable private Integer numSlices;
+
+    /* Because we can be scrolling over a long period of time then the scrollId needs to be resilient.
+     * With Elasticsearch, you can't use the same scrollId multiple times and get the same result set [1].
+     * If we keep track of the scrollId and the total number of records that have been output for the slice,
+     * it would be possible to recover state and restart output from where it left off by skipping the number of
+     * records that
+     *
+     *
+     * TODO: Determine how to observe that a scrollId has been re-used (Likely the case of a node failure)
+     * TODO: Determine the best way to "skip" in the case of a stale scrollId
+     *
+     * [1] https://discuss.elastic.co/t/do-unique-reusable--scroll-ids-exist/12280/3
+     */
+    @StateId("scrollPerSlice")
+    private StateSpec<ValueState<Map<Integer, String>>> scrollPerSlice;
 
     private transient RestClient restClient;
+
     private transient String scrollId;
+
     private transient int backendVersion;
 
     private ElasticsearchReadFn(
@@ -795,8 +816,8 @@ public class ElasticsearchIO {
         String scrollKeepalive,
         QueryPreparator<ParameterT> preparator,
         @Nullable String shardPreference,
-        @Nullable Integer numSlices,
-        @Nullable Integer sliceId) {
+        @Nullable Integer numSlices) {
+
       this.connectionConfiguration = connectionConfiguration;
       this.queryTemplate = query;
       this.preparator = preparator;
@@ -806,37 +827,8 @@ public class ElasticsearchIO {
 
       this.shardPreference = shardPreference;
       this.numSlices = numSlices;
-      this.sliceId = sliceId;
     }
-    //    @GetInitialRestriction
-    //    public OffsetRange getInitialRange(ParameterT element) {
-    //      /* TODO: Execute tehe query but with a size parameter set to zero so we can get the number of records.
-    //       * OR: The range is the number of shards or slices.
-    //       * Maybe we can keep track of the number of records and shard count once we make the first query.
-    //       * That all said, we're using a long running cursor for the processing of elements
-    //       * And we want to ensure that the output doesn't create a hot bundle(window,key)
-    //       * Each incoming query can be sent to a different worker.
-    //       *
-    //       * How can we split up the incoming work.  It's technically incremental so maybe we can just use the number of slices.
-    //       */
-    //
-    //      return new OffsetRange(0L, element.getValue());
-    //    }
-    //    @SplitRestriction
-    //    splitRestriction(ParameterT element, RestrictionT restriction, Backlog backlog, OutputReceiver<RestrictionT> receiver) {
-    //
-    //    }
-    //    private static JsonNode getStats(
-    //            ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
-    //      HashMap<String, String> params = new HashMap<>();
-    //      if (shardLevel) {
-    //        params.put("level", "shards");
-    //      }
-    //      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
-    //      try (RestClient restClient = connectionConfiguration.createClient()) {
-    //        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
-    //      }
-    //    }
+
     private String getPreparedQuery(ProcessContext c) {
       String query =
           preparator == null ? queryTemplate : preparator.prepare(c.element(), queryTemplate);
@@ -848,62 +840,128 @@ public class ElasticsearchIO {
 
     @ProcessElement
     public void processElement(ProcessContext c) throws IOException {
-
-      // We can use slices if > 5 for parallelization otherwise don't worry about it at all.
+      /*
+      We can either compose one DoFn per slice and join them (if order doesn't matter and it shouldn't)
+      and if we do that, the sliceId will be passed in, otherwise the SplittableDoFn is best.
+       */
+      // We can use slices if > v5 for parallelization otherwise don't worry about it at all.
       String query = getPreparedQuery(c);
-      if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1) {
-        //if there is more than one slice, add the slice to the user query
-        String sliceQuery =
-            String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
-        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
-      }
+//      if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1) {
+//        //if there is more than one slice, add the slice to the user query
+//        String sliceQuery =
+//            String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
+//        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
+//      }
 
       JsonNode searchResult = executeSearchQuery(query);
 
-      //      JsonNode hits = searchResult.path("hits").path("hits");
+      updateScrollId(searchResult);
+      while (outputResults(c, searchResult)) {
+        searchResult = advance();
+      }
+    }
+    // @ProcessElement
+    public ProcessContinuation processElementSplittable(
+            ProcessContext c,
+            OffsetRangeTracker tracker
+    ) throws IOException {
 
-      // Because this is a query that's able to be run multiple times we've kept track of where we are
-      // So we will check this first, then add the skip to the Elasticsearch query before completing.
-      //
-      //      long startedAt = tracker.currentRestriction().getFrom();
-      //      long currentOffset = startedAt;
-      //
-      //      // Convert to Java streams, just some nice syntactic sugar.
-      //      StreamSupport
-      //              .stream(hits.spliterator(), false)
-      //              .skip(startedAt);
+      // Elasticsearch supports parallelization of requests based on a concept called slices.
+      // Slicing can be done in parallel, scrolling must be done in serial for each slice.
+      for (long sliceId = tracker.currentRestriction().getFrom();
+           sliceId < tracker.currentRestriction().getTo();
+           ++sliceId) {
+        // Now that we have the slice we're currently working on, check state and see if we have a current scroll identifier.
+        if (tracker.tryClaim(sliceId)) {
+          String query = getPreparedQuery(c);
+
+          // We can only use slices if the backend version is >=5
+          if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1) {
+            //if there is more than one slice, add the slice to the user query
+            String sliceQuery =
+                    String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
+            query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
+          }
+
+          boolean outputSuccess;
+          do {
+            JsonNode searchResult = this.executeQueryOrAdvance(query);
+            // TODO: Determine if it's safe to store state locally (State API) that keeps the scrollId and return ProcessContinuation.resume()
+            // This will help with worker failures that occur while processing a specific page.
+            // If we were to do this, we would only want to update the scroll state after the result page is output.
+            // That means outputResults should own updating the scroll state and the executeOrAdvance would just retrieve it.
+            outputSuccess = outputResults(c, searchResult);
+            if (outputSuccess) {
+              updateScrollId(searchResult);
+            }
+          } while (outputSuccess);
+
+          return ProcessContinuation.resume();
+        }
+      }
+
+      return ProcessContinuation.stop();
+      /*
+        Because this is a query that's able to be run multiple times we've kept track of where we are
+        So we will check this first, then add the skip to the Elasticsearch query before completing.
+       */
+
+
 
       // TODO: We should also consider a separate output for aggregations
       // TODO: Consider a function to transform each JSON before defining output (Remove OutputT <: String)
       // TODO: Implement the same transformation for aggregation outputs.
-      /* We're going to scroll through the entire set of results.
-       *  This is different from the BoundedReader implementation in that if there is
-       *  a read failure, the entire bundle will be executed again.  If this does happen,
-       *  we want to remove the scroll
+    }
+
+    private static JsonNode getStats(
+            ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+      HashMap<String, String> params = new HashMap<>();
+      if (shardLevel) {
+        params.put("level", "shards");
+      }
+      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
+      try (RestClient restClient = connectionConfiguration.createClient()) {
+        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
+      }
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRange(ParameterT element) throws IOException {
+      /* TODO: Execute tehe query but with a size parameter set to zero so we can get the number of records.
+       * OR: The range is the number of slices which will default to tne number of shards in the target index.
+       *
+       * Maybe we can keep track of the number of records and shard count once we make the first query.
+       * That all said, we're using a long running cursor for the processing of elements
+       * and we want to ensure that the output doesn't create a hot bundle(window,key)
+       * Each incoming query can be sent to a different worker.
+       *
        */
-
-      //      // Now that we're ready to output results, we're going to use the fact that we still have elements
-      //      while(hits.size() > 0) {
-      //        for (JsonNode hit : hits) {
-      //          if(isWithMetadata) {
-      //            c.output(hit.toString());
-      //          } else {
-      //            String document = hit.path("_source").toString();
-      //            c.output(document);
-      //          }
-      //        }
-      //        // Execute the next range query and update hits.
-      //      }
-
-      if (!outputResults(c, searchResult)) {
-        return;
+      // There can be only one worker pulling data concurrently with Elasticsearch <5 so there is only one
+      if (backendVersion < 5) {
+        return new OffsetRange(0L, 1L);
       }
-      updateScrollId(searchResult);
-      while (true) {
-        if (!advance(c)) {
-          break;
-        }
+      if (numSlices == null) {
+        JsonNode statsJson = getStats(connectionConfiguration, true);
+        JsonNode shardsJson =
+                statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
+
+        numSlices = Iterators.size(shardsJson.elements());
       }
+      return new OffsetRange(0L, numSlices);
+    }
+    @SplitRestriction
+    void splitRestriction(ParameterT element, OffsetRange restriction, Backlog backlog, OutputReceiver<OffsetRange> receiver) {
+      // Return two ranges, one for the current restriction and
+
+      receiver.output(new OffsetRange(restriction.getFrom(), restriction.getFrom()));
+
+      if (restriction.getTo() - restriction.getFrom() > 1) {
+        receiver.output(new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
+      }
+    }
+
+    private void updateScrollId(JsonNode searchResult) {
+      scrollId = searchResult.path("_scroll_id").asText();
     }
 
     private JsonNode executeSearchQuery(String query) throws IOException {
@@ -925,6 +983,22 @@ public class ElasticsearchIO {
       return parseResponse(response.getEntity());
     }
 
+    private JsonNode advance() throws IOException {
+
+      String requestBody =
+              String.format("{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}", scrollKeepalive, scrollId);
+      HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Response response =
+              restClient.performRequest("GET", "/_search/scroll", Collections.emptyMap(), scrollEntity);
+      return parseResponse(response.getEntity());
+    }
+
+    private JsonNode executeQueryOrAdvance(String query) throws IOException {
+      JsonNode result = scrollId == null ? executeSearchQuery(query) : advance();
+      updateScrollId(result);
+      return result;
+    }
+
     private boolean outputResults(ProcessContext c, JsonNode searchResult) {
       JsonNode hits = searchResult.path("hits").path("hits");
       // Stop if the query didn't produce any results.
@@ -940,22 +1014,6 @@ public class ElasticsearchIO {
         }
       }
       return true;
-    }
-
-    private boolean advance(ProcessContext c) throws IOException {
-
-      String requestBody =
-          String.format("{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}", scrollKeepalive, scrollId);
-      HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-      Response response =
-          restClient.performRequest("GET", "/_search/scroll", Collections.emptyMap(), scrollEntity);
-      JsonNode searchResult = parseResponse(response.getEntity());
-      updateScrollId(searchResult);
-      return outputResults(c, searchResult);
-    }
-
-    private void updateScrollId(JsonNode searchResult) {
-      scrollId = searchResult.path("_scroll_id").asText();
     }
 
     @Setup
