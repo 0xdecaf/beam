@@ -791,7 +791,10 @@ public class ElasticsearchIO {
      * With Elasticsearch, you can't use the same scrollId multiple times and get the same result set [1].
      * If we keep track of the scrollId and the total number of records that have been output for the slice,
      * it would be possible to recover state and restart output from where it left off by skipping the number of
-     * records that
+     * records that have succeeded, however that might not be a good strategy.
+     *
+     * Problem: While iterating through the scroll for the slice there could be a failure.  If it's possible to request the
+     * results again then we can just keep the last scrollId for the slice in @StateId("scrollPerSlice")
      *
      *
      * TODO: Determine how to observe that a scrollId has been re-used (Likely the case of a node failure)
@@ -799,8 +802,8 @@ public class ElasticsearchIO {
      *
      * [1] https://discuss.elastic.co/t/do-unique-reusable--scroll-ids-exist/12280/3
      */
-    @StateId("scrollPerSlice")
-    private StateSpec<ValueState<Map<Integer, String>>> scrollPerSlice;
+//    @StateId("scrollPerSlice")
+//    private StateSpec<ValueState<Map<Integer, String>>> scrollPerSlice;
 
     private transient RestClient restClient;
 
@@ -913,21 +916,9 @@ public class ElasticsearchIO {
       // TODO: Implement the same transformation for aggregation outputs.
     }
 
-    private static JsonNode getStats(
-            ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
-      HashMap<String, String> params = new HashMap<>();
-      if (shardLevel) {
-        params.put("level", "shards");
-      }
-      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
-      try (RestClient restClient = connectionConfiguration.createClient()) {
-        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
-      }
-    }
-
-    @GetInitialRestriction
+    //@GetInitialRestriction
     public OffsetRange getInitialRange(ParameterT element) throws IOException {
-      /* TODO: Execute tehe query but with a size parameter set to zero so we can get the number of records.
+      /* TODO: Execute the query but with a size parameter set to zero so we can get the number of records.
        * OR: The range is the number of slices which will default to tne number of shards in the target index.
        *
        * Maybe we can keep track of the number of records and shard count once we make the first query.
@@ -949,14 +940,27 @@ public class ElasticsearchIO {
       }
       return new OffsetRange(0L, numSlices);
     }
-    @SplitRestriction
-    void splitRestriction(ParameterT element, OffsetRange restriction, Backlog backlog, OutputReceiver<OffsetRange> receiver) {
+
+    //@SplitRestriction
+    public void splitRestriction(ParameterT element, OffsetRange restriction, Backlog backlog, OutputReceiver<OffsetRange> receiver) {
       // Return two ranges, one for the current restriction and
 
       receiver.output(new OffsetRange(restriction.getFrom(), restriction.getFrom()));
 
       if (restriction.getTo() - restriction.getFrom() > 1) {
         receiver.output(new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
+      }
+    }
+
+    private static JsonNode getStats(
+        ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+      HashMap<String, String> params = new HashMap<>();
+      if (shardLevel) {
+        params.put("level", "shards");
+      }
+      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
+      try (RestClient restClient = connectionConfiguration.createClient()) {
+        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
       }
     }
 

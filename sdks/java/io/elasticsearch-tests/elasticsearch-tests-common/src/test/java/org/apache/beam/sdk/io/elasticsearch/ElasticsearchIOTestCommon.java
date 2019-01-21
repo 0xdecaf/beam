@@ -220,7 +220,9 @@ class ElasticsearchIOTestCommon implements Serializable {
                 //set to default value, useful just to test parameter passing.
                 .withBatchSize(100L)
                 .withQuery(queryTemplate)
-                .withQueryPreparator((ElasticsearchIO.QueryPreparator<String>) (element, query) -> query.replace("${scientist}", element))
+                .withQueryPreparator((ElasticsearchIO.QueryPreparator<String>) (element, query) ->
+                    query.replace("${scientist}", element)
+                )
           );
 
     PAssert.thatSingleton(output.apply("Count", Count.globally()))
