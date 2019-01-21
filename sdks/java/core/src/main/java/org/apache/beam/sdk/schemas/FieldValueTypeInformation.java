@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.schemas;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
@@ -44,6 +44,9 @@ public abstract class FieldValueTypeInformation implements Serializable {
   /** Returns the field type. */
   public abstract TypeDescriptor getType();
 
+  /** Returns the raw class type. */
+  public abstract Class getRawType();
+
   @Nullable
   public abstract Field getField();
 
@@ -52,15 +55,15 @@ public abstract class FieldValueTypeInformation implements Serializable {
 
   /** If the field is a container type, returns the element type. */
   @Nullable
-  public abstract Type getElementType();
+  public abstract FieldValueTypeInformation getElementType();
 
   /** If the field is a map type, returns the key type. */
   @Nullable
-  public abstract Type getMapKeyType();
+  public abstract FieldValueTypeInformation getMapKeyType();
 
   /** If the field is a map type, returns the key type. */
   @Nullable
-  public abstract Type getMapValueType();
+  public abstract FieldValueTypeInformation getMapValueType();
 
   abstract Builder toBuilder();
 
@@ -72,24 +75,28 @@ public abstract class FieldValueTypeInformation implements Serializable {
 
     public abstract Builder setType(TypeDescriptor type);
 
+    public abstract Builder setRawType(Class type);
+
     public abstract Builder setField(@Nullable Field field);
 
     public abstract Builder setMethod(@Nullable Method method);
 
-    public abstract Builder setElementType(@Nullable Type elementType);
+    public abstract Builder setElementType(@Nullable FieldValueTypeInformation elementType);
 
-    public abstract Builder setMapKeyType(@Nullable Type mapKeyType);
+    public abstract Builder setMapKeyType(@Nullable FieldValueTypeInformation mapKeyType);
 
-    public abstract Builder setMapValueType(@Nullable Type mapValueType);
+    public abstract Builder setMapValueType(@Nullable FieldValueTypeInformation mapValueType);
 
     abstract FieldValueTypeInformation build();
   }
 
   public static FieldValueTypeInformation forField(Field field) {
+    TypeDescriptor type = TypeDescriptor.of(field.getGenericType());
     return new AutoValue_FieldValueTypeInformation.Builder()
         .setName(field.getName())
         .setNullable(field.isAnnotationPresent(Nullable.class))
-        .setType(TypeDescriptor.of(field.getGenericType()))
+        .setType(type)
+        .setRawType(type.getRawType())
         .setField(field)
         .setElementType(getArrayComponentType(field))
         .setMapKeyType(getMapKeyType(field))
@@ -113,6 +120,7 @@ public abstract class FieldValueTypeInformation implements Serializable {
         .setName(name)
         .setNullable(nullable)
         .setType(type)
+        .setRawType(type.getRawType())
         .setMethod(method)
         .setElementType(getArrayComponentType(type))
         .setMapKeyType(getMapKeyType(type))
@@ -137,6 +145,7 @@ public abstract class FieldValueTypeInformation implements Serializable {
         .setName(name)
         .setNullable(nullable)
         .setType(type)
+        .setRawType(type.getRawType())
         .setMethod(method)
         .setElementType(getArrayComponentType(type))
         .setMapKeyType(getMapKeyType(type))
@@ -148,16 +157,18 @@ public abstract class FieldValueTypeInformation implements Serializable {
     return toBuilder().setName(name).build();
   }
 
-  private static Type getArrayComponentType(Field field) {
+  private static FieldValueTypeInformation getArrayComponentType(Field field) {
     return getArrayComponentType(TypeDescriptor.of(field.getGenericType()));
   }
 
   @Nullable
-  private static Type getArrayComponentType(TypeDescriptor valueType) {
+  private static FieldValueTypeInformation getArrayComponentType(TypeDescriptor valueType) {
+    // TODO: Figure out nullable elements.
+    TypeDescriptor componentType = null;
     if (valueType.isArray()) {
       Type component = valueType.getComponentType().getType();
       if (!component.equals(byte.class)) {
-        return component;
+        componentType = TypeDescriptor.of(component);
       }
     } else if (valueType.isSubtypeOf(TypeDescriptor.of(Collection.class))) {
       TypeDescriptor<Collection<?>> collection = valueType.getSupertype(Collection.class);
@@ -165,37 +176,45 @@ public abstract class FieldValueTypeInformation implements Serializable {
         ParameterizedType ptype = (ParameterizedType) collection.getType();
         java.lang.reflect.Type[] params = ptype.getActualTypeArguments();
         checkArgument(params.length == 1);
-        return params[0];
+        componentType = TypeDescriptor.of(params[0]);
       } else {
         throw new RuntimeException("Collection parameter is not parameterized!");
       }
     }
-    return null;
-  }
+    if (componentType == null) {
+      return null;
+    }
 
-  public Class getRawType() {
-    return getType().getRawType();
+    return new AutoValue_FieldValueTypeInformation.Builder()
+        .setName("")
+        .setNullable(false)
+        .setType(componentType)
+        .setRawType(componentType.getRawType())
+        .setElementType(getArrayComponentType(componentType))
+        .setMapKeyType(getMapKeyType(componentType))
+        .setMapValueType(getMapValueType(componentType))
+        .build();
   }
 
   // If the Field is a map type, returns the key type, otherwise returns a null reference.
   @Nullable
-  private static Type getMapKeyType(Field field) {
+  private static FieldValueTypeInformation getMapKeyType(Field field) {
     return getMapKeyType(TypeDescriptor.of(field.getGenericType()));
   }
 
   @Nullable
-  private static Type getMapKeyType(TypeDescriptor<?> typeDescriptor) {
+  private static FieldValueTypeInformation getMapKeyType(TypeDescriptor<?> typeDescriptor) {
     return getMapType(typeDescriptor, 0);
   }
 
   // If the Field is a map type, returns the value type, otherwise returns a null reference.
   @Nullable
-  private static Type getMapValueType(Field field) {
+  private static FieldValueTypeInformation getMapValueType(Field field) {
     return getMapType(TypeDescriptor.of(field.getGenericType()), 1);
   }
 
   @Nullable
-  private static Type getMapValueType(TypeDescriptor typeDescriptor) {
+  private static FieldValueTypeInformation getMapValueType(TypeDescriptor typeDescriptor) {
     return getMapType(typeDescriptor, 1);
   }
 
@@ -203,17 +222,29 @@ public abstract class FieldValueTypeInformation implements Serializable {
   // Otherwise returns a null reference.
   @SuppressWarnings("unchecked")
   @Nullable
-  private static Type getMapType(TypeDescriptor valueType, int index) {
+  private static FieldValueTypeInformation getMapType(TypeDescriptor valueType, int index) {
+    TypeDescriptor mapType = null;
     if (valueType.isSubtypeOf(TypeDescriptor.of(Map.class))) {
       TypeDescriptor<Collection<?>> map = valueType.getSupertype(Map.class);
       if (map.getType() instanceof ParameterizedType) {
         ParameterizedType ptype = (ParameterizedType) map.getType();
         java.lang.reflect.Type[] params = ptype.getActualTypeArguments();
-        return params[index];
+        mapType = TypeDescriptor.of(params[index]);
       } else {
         throw new RuntimeException("Map type is not parameterized! " + map);
       }
     }
-    return null;
+    if (mapType == null) {
+      return null;
+    }
+    return new AutoValue_FieldValueTypeInformation.Builder()
+        .setName("")
+        .setNullable(false)
+        .setType(mapType)
+        .setRawType(mapType.getRawType())
+        .setElementType(getArrayComponentType(mapType))
+        .setMapKeyType(getMapKeyType(mapType))
+        .setMapValueType(getMapValueType(mapType))
+        .build();
   }
 }

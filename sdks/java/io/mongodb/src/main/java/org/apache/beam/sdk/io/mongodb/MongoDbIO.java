@@ -17,18 +17,19 @@
  */
 package org.apache.beam.sdk.io.mongodb;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.mongodb.client.model.Projections.include;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
-import com.google.common.annotations.VisibleForTesting;
 import com.mongodb.BasicDBObject;
+import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoClient;
 import com.mongodb.MongoClientOptions;
 import com.mongodb.MongoClientURI;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.InsertManyOptions;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -45,6 +46,7 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.annotations.VisibleForTesting;
 import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,6 +121,7 @@ public class MongoDbIO {
         .setSslEnabled(false)
         .setIgnoreSSLCertificate(false)
         .setSslInvalidHostNameAllowed(false)
+        .setOrdered(true)
         .build();
   }
 
@@ -612,6 +615,8 @@ public class MongoDbIO {
 
     abstract boolean ignoreSSLCertificate();
 
+    abstract boolean ordered();
+
     @Nullable
     abstract String database();
 
@@ -635,6 +640,8 @@ public class MongoDbIO {
       abstract Builder setSslInvalidHostNameAllowed(boolean value);
 
       abstract Builder setIgnoreSSLCertificate(boolean value);
+
+      abstract Builder setOrdered(boolean value);
 
       abstract Builder setDatabase(String database);
 
@@ -705,6 +712,17 @@ public class MongoDbIO {
       return builder().setSslInvalidHostNameAllowed(invalidHostNameAllowed).build();
     }
 
+    /**
+     * Enables ordered bulk insertion (default: true).
+     *
+     * @see <a href=
+     *     "https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#basic">
+     *     specification of MongoDb CRUD operations</a>
+     */
+    public Write withOrdered(boolean ordered) {
+      return builder().setOrdered(ordered).build();
+    }
+
     /** Enable ignoreSSLCertificate for ssl for connection (allow for self signed ceritificates). */
     public Write withIgnoreSSLCertificate(boolean ignoreSSLCertificate) {
       return builder().setIgnoreSSLCertificate(ignoreSSLCertificate).build();
@@ -746,6 +764,7 @@ public class MongoDbIO {
       builder.add(DisplayData.item("sslEnable", sslEnabled()));
       builder.add(DisplayData.item("sslInvalidHostNameAllowed", sslInvalidHostNameAllowed()));
       builder.add(DisplayData.item("ignoreSSLCertificate", ignoreSSLCertificate()));
+      builder.add(DisplayData.item("ordered", ordered()));
       builder.add(DisplayData.item("database", database()));
       builder.add(DisplayData.item("collection", collection()));
       builder.add(DisplayData.item("batchSize", batchSize()));
@@ -799,7 +818,14 @@ public class MongoDbIO {
         }
         MongoDatabase mongoDatabase = client.getDatabase(spec.database());
         MongoCollection<Document> mongoCollection = mongoDatabase.getCollection(spec.collection());
-        mongoCollection.insertMany(batch);
+        try {
+          mongoCollection.insertMany(batch, new InsertManyOptions().ordered(spec.ordered()));
+        } catch (MongoBulkWriteException e) {
+          if (spec.ordered()) {
+            throw e;
+          }
+        }
+
         batch.clear();
       }
 

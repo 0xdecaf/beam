@@ -23,9 +23,6 @@ import com.google.api.services.dataflow.model.CounterMetadata;
 import com.google.api.services.dataflow.model.CounterStructuredName;
 import com.google.api.services.dataflow.model.CounterStructuredNameAndMetadata;
 import com.google.api.services.dataflow.model.CounterUpdate;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
 import java.io.Closeable;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -40,6 +37,9 @@ import org.apache.beam.runners.dataflow.worker.util.common.worker.ExecutionState
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ExecutionStateTracker.ExecutionState;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.OperationContext;
 import org.apache.beam.sdk.metrics.MetricsContainer;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.ImmutableSet;
 import org.joda.time.Duration;
 import org.joda.time.format.PeriodFormatter;
 import org.joda.time.format.PeriodFormatterBuilder;
@@ -202,7 +202,7 @@ public class DataflowOperationContext implements OperationContext {
     private static final ImmutableSet<String> FRAMEWORK_CLASSES =
         ImmutableSet.of(SimpleDoFnRunner.class.getName(), DoFnInstanceManagers.class.getName());
 
-    private String getLullMessage(Thread trackedThread, Duration millis) {
+    protected String getLullMessage(Thread trackedThread, Duration millis) {
       StringBuilder message = new StringBuilder();
       message.append("Processing stuck");
       if (getStepName() != null) {

@@ -248,9 +248,11 @@ class BeamModulePlugin implements Plugin<Project> {
     // A string representing the jobServer Configuration.
     String jobServerConfig
     // Number of parallel test runs.
-    Integer parallelism = 1
+    Integer numParallelTests = 1
     // Extra options to pass to TestPipeline
     String[] pipelineOpts = []
+    // Spin up the Harness inside a DOCKER container
+    Environment environment = Environment.DOCKER
     // Categories for tests to run.
     Closure testCategories = {
       includeCategories 'org.apache.beam.sdk.testing.ValidatesRunner'
@@ -260,6 +262,12 @@ class BeamModulePlugin implements Plugin<Project> {
     }
     // Configuration for the classpath when running the test.
     Configuration testClasspathConfiguration
+
+    enum Environment {
+      DOCKER,   // Docker-based Harness execution
+      PROCESS,  // Process-based Harness execution
+      EMBEDDED, // Execute directly inside the execution engine (testing only)
+    }
   }
 
   def isRelease(Project project) {
@@ -275,7 +283,7 @@ class BeamModulePlugin implements Plugin<Project> {
 
     // Automatically use the official release version if we are performing a release
     // otherwise append '-SNAPSHOT'
-    project.version = '2.10.0'
+    project.version = '2.11.0'
     if (!isRelease(project)) {
       project.version += '-SNAPSHOT'
     }
@@ -327,8 +335,9 @@ class BeamModulePlugin implements Plugin<Project> {
     def proto_google_common_protos_version = "1.12.0"
     def hamcrest_version = "1.3"
     def hadoop_version = "2.7.3"
-    def jackson_version = "2.9.5"
+    def jackson_version = "2.9.8"
     def spark_version = "2.3.2"
+    def nemo_version = "0.1"
     def apex_core_version = "3.7.0"
     def apex_malhar_version = "3.4.0"
     def postgres_version = "42.2.2"
@@ -350,6 +359,8 @@ class BeamModulePlugin implements Plugin<Project> {
         activemq_junit                              : "org.apache.activemq.tooling:activemq-junit:5.13.1",
         activemq_kahadb_store                       : "org.apache.activemq:activemq-kahadb-store:5.13.1",
         activemq_mqtt                               : "org.apache.activemq:activemq-mqtt:5.13.1",
+        antlr                                       : "org.antlr:antlr4:4.7",
+        antlr_runtime                               : "org.antlr:antlr4-runtime:4.7",
         apex_common                                 : "org.apache.apex:apex-common:$apex_core_version",
         apex_engine                                 : "org.apache.apex:apex-engine:$apex_core_version",
         args4j                                      : "args4j:args4j:2.33",
@@ -420,11 +431,12 @@ class BeamModulePlugin implements Plugin<Project> {
         jackson_module_scala                        : "com.fasterxml.jackson.module:jackson-module-scala_2.11:$jackson_version",
         jaxb_api                                    : "javax.xml.bind:jaxb-api:$jaxb_api_version",
         joda_time                                   : "joda-time:joda-time:2.4",
-        junit                                       : "junit:junit:4.12",
+        junit                                       : "junit:junit:4.13-beta-1",
         kafka_2_11                                  : "org.apache.kafka:kafka_2.11:$kafka_version",
         kafka_clients                               : "org.apache.kafka:kafka-clients:$kafka_version",
         malhar_library                              : "org.apache.apex:malhar-library:$apex_malhar_version",
         mockito_core                                : "org.mockito:mockito-core:1.10.19",
+        nemo_compiler_frontend_beam                 : "org.apache.nemo:nemo-compiler-frontend-beam:$nemo_version",
         netty_handler                               : "io.netty:netty-handler:$netty_version",
         netty_tcnative_boringssl_static             : "io.netty:netty-tcnative-boringssl-static:2.0.8.Final",
         netty_transport_native_epoll                : "io.netty:netty-transport-native-epoll:$netty_version",
@@ -444,7 +456,7 @@ class BeamModulePlugin implements Plugin<Project> {
         spark_network_common                        : "org.apache.spark:spark-network-common_2.11:$spark_version",
         spark_streaming                             : "org.apache.spark:spark-streaming_2.11:$spark_version",
         stax2_api                                   : "org.codehaus.woodstox:stax2-api:3.1.4",
-        vendored_grpc_1_13_1                        : "org.apache.beam:beam-vendor-grpc-1_13_1:0.1",
+        vendored_grpc_1_13_1                        : "org.apache.beam:beam-vendor-grpc-1_13_1:0.2",
         vendored_guava_20_0                         : "org.apache.beam:beam-vendor-guava-20_0:0.1",
         woodstox_core_asl                           : "org.codehaus.woodstox:woodstox-core-asl:4.4.1",
         quickcheck_core                             : "com.pholser:junit-quickcheck-core:$quickcheck_version",
@@ -597,6 +609,7 @@ class BeamModulePlugin implements Plugin<Project> {
         'options',
         'cast',
         'deprecation',
+        'fallthrough',
         'processing',
         'rawtypes',
         'serial',
@@ -615,7 +628,7 @@ class BeamModulePlugin implements Plugin<Project> {
           '-Xlint:all',
           '-Werror',
           '-XepDisableWarningsInGeneratedCode',
-          '-XepExcludedPaths:(.*/)?(build/generated.*avro-java|build/generated)/.*',
+          '-XepExcludedPaths:(.*/)?(build/generated-src|build/generated.*avro-java|build/generated)/.*',
           '-Xep:MutableConstantField:OFF' // Guava's immutable collections cannot appear on API surface.
         ]
         + (defaultLintSuppressions + configuration.disableLintWarnings).collect { "-Xlint:-${it}" })
@@ -648,17 +661,18 @@ class BeamModulePlugin implements Plugin<Project> {
         // Note that these plugins specifically use the compileOnly and testCompileOnly
         // configurations because they are never required to be shaded or become a
         // dependency of the output.
-        def auto_value = "com.google.auto.value:auto-value:1.5.3"
+        def auto_value = "com.google.auto.value:auto-value:1.6.3"
+        def auto_value_annotations = "com.google.auto.value:auto-value-annotations:1.6.3"
         def auto_service = "com.google.auto.service:auto-service:1.0-rc2"
 
-        compileOnly auto_value
+        compileOnly auto_value_annotations
+        testCompileOnly auto_value_annotations
         apt auto_value
-        testCompileOnly auto_value
         testApt auto_value
 
         compileOnly auto_service
-        apt auto_service
         testCompileOnly auto_service
+        apt auto_service
         testApt auto_service
 
         // These dependencies are needed to avoid error-prone warnings on package-info.java files,
@@ -669,8 +683,8 @@ class BeamModulePlugin implements Plugin<Project> {
         // See: https://www.apache.org/legal/resolved.html#prohibited
         def findbugs_annotations = "com.google.code.findbugs:annotations:3.0.1"
         compileOnly findbugs_annotations
-        apt findbugs_annotations
         testCompileOnly findbugs_annotations
+        apt findbugs_annotations
         testApt findbugs_annotations
       }
 
@@ -715,7 +729,7 @@ class BeamModulePlugin implements Plugin<Project> {
         enforceCheck !disableSpotlessCheck
         java {
           licenseHeader javaLicenseHeader
-          googleJavaFormat()
+          googleJavaFormat('1.7')
         }
       }
 
@@ -848,9 +862,8 @@ class BeamModulePlugin implements Plugin<Project> {
           doLast {
             new File("${pomPropertiesFile}").text =
                     """version=${project.version}
-groupId=${project.group}
-artifactId=${project.name}
-"""
+                       groupId=${project.group}
+                       artifactId=${project.name}"""
           }
         }
 
@@ -1382,7 +1395,7 @@ artifactId=${project.name}
               shadowClosure: GrpcVendoring.shadowClosure() << {
                 // We perform all the code relocations but don't include
                 // any of the actual dependencies since they will be supplied
-                // by org.apache.beam:beam-vendor-grpc-v1_13_1:0.1
+                // by org.apache.beam:beam-vendor-grpc-v1p13p1:0.1
                 dependencies {
                   include(dependency { return false })
                 }
@@ -1419,7 +1432,7 @@ artifactId=${project.name}
         }
       }
 
-      project.dependencies GrpcVendoring.dependenciesClosure() << { shadow 'org.apache.beam:beam-vendor-grpc-1_13_1:0.1' }
+      project.dependencies GrpcVendoring.dependenciesClosure() << { shadow project.ext.library.java.vendored_grpc_1_13_1 }
     }
 
     /** ***********************************************************************************************/
@@ -1427,6 +1440,17 @@ artifactId=${project.name}
     // TODO: Decide whether this should be inlined into the one project that relies on it
     // or be left here.
     project.ext.applyAvroNature = { project.apply plugin: "com.commercehub.gradle.plugin.avro" }
+
+    project.ext.applyAntlrNature = {
+      project.apply plugin: 'antlr'
+      def generatedDir = "${project.buildDir}/generated-src/antlr/main/java/"
+      project.idea {
+        module {
+          sourceDirs += project.file(generatedDir)
+          generatedSourceDirs += project.file(generatedDir)
+        }
+      }
+    }
 
     // Creates a task to run the quickstart for a runner.
     // Releases version and URL, can be overriden for a RC release with
@@ -1483,6 +1507,9 @@ artifactId=${project.name}
         "--environmentCacheMillis=10000"
       ]
       beamTestPipelineOptions.addAll(config.pipelineOpts)
+      if (config.environment == PortableValidatesRunnerConfiguration.Environment.EMBEDDED) {
+        beamTestPipelineOptions += "--defaultEnvironmentType=EMBEDDED"
+      }
       if (config.jobServerConfig) {
         beamTestPipelineOptions.add("--jobServerConfig=${config.jobServerConfig}")
       }
@@ -1492,9 +1519,11 @@ artifactId=${project.name}
         systemProperty "beamTestPipelineOptions", JsonOutput.toJson(beamTestPipelineOptions)
         classpath = config.testClasspathConfiguration
         testClassesDirs = project.files(project.project(":beam-sdks-java-core").sourceSets.test.output.classesDirs, project.project(":beam-runners-core-java").sourceSets.test.output.classesDirs)
-        maxParallelForks config.parallelism
+        maxParallelForks config.numParallelTests
         useJUnit(config.testCategories)
-        dependsOn ':beam-sdks-java-container:docker'
+        if (config.environment == PortableValidatesRunnerConfiguration.Environment.DOCKER) {
+          dependsOn ':beam-sdks-java-container:docker'
+        }
       }
     }
 
@@ -1524,7 +1553,7 @@ artifactId=${project.name}
           project.exec { commandLine 'virtualenv', "${project.ext.envdir}" }
           project.exec {
             executable 'sh'
-            args '-c', ". ${project.ext.envdir}/bin/activate && pip install --upgrade tox==3.0.0 grpcio-tools==1.3.5"
+            args '-c', ". ${project.ext.envdir}/bin/activate && pip install --retries 10 --upgrade tox==3.0.0 grpcio-tools==1.3.5"
           }
         }
         // Gradle will delete outputs whenever it thinks they are stale. Putting a
@@ -1556,7 +1585,7 @@ artifactId=${project.name}
         doLast {
           project.exec {
             executable 'sh'
-            args '-c', ". ${project.ext.envdir}/bin/activate && pip install -e ${project.ext.pythonRootDir}/[gcp,test]"
+            args '-c', ". ${project.ext.envdir}/bin/activate && pip install --retries 10 -e ${project.ext.pythonRootDir}/[gcp,test]"
           }
         }
       }

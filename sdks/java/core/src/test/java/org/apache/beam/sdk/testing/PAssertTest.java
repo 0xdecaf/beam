@@ -26,8 +26,6 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.google.common.base.Throwables;
-import com.google.common.collect.Iterables;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -42,8 +40,12 @@ import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.testing.PAssert.PCollectionContentsAssert.MatcherCheckerFn;
 import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.Sum;
+import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
@@ -54,6 +56,8 @@ import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TimestampedValue;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.base.Throwables;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Iterables;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Rule;
@@ -306,7 +310,10 @@ public class PAssertTest implements Serializable {
 
   /** Basic test for {@code isEqualTo}. */
   @Test
-  @Category({ValidatesRunner.class, DataflowPortabilityExecutableStageUnsupported.class})
+  @Category({
+    ValidatesRunner.class,
+    UsesStatefulParDo.class // This test fails if State is unsupported despite no direct usage.
+  })
   public void testWindowedIsEqualTo() throws Exception {
     PCollection<Integer> pcollection =
         pipeline
@@ -314,7 +321,22 @@ public class PAssertTest implements Serializable {
                 Create.timestamped(
                     TimestampedValue.of(43, new Instant(250L)),
                     TimestampedValue.of(22, new Instant(-250L))))
-            .apply(Window.into(FixedWindows.of(Duration.millis(500L))));
+            .apply(Window.into(FixedWindows.of(Duration.millis(500L))))
+            // Materialize final panes to be able to check for single element ON_TIME panes,
+            // elements might be in EARLY panes otherwise.
+            .apply(WithKeys.of(0))
+            .apply(GroupByKey.create())
+            .apply(
+                ParDo.of(
+                    new DoFn<KV<Integer, Iterable<Integer>>, Integer>() {
+                      @ProcessElement
+                      public void processElement(ProcessContext ctxt) {
+                        for (Integer integer : ctxt.element().getValue()) {
+                          ctxt.output(integer);
+                        }
+                      }
+                    }));
+
     PAssert.thatSingleton(pcollection)
         .inOnlyPane(new IntervalWindow(new Instant(0L), new Instant(500L)))
         .isEqualTo(43);
@@ -385,7 +407,7 @@ public class PAssertTest implements Serializable {
 
   /** Tests that windowed {@code containsInAnyOrder} is actually order-independent. */
   @Test
-  @Category({ValidatesRunner.class, DataflowPortabilityExecutableStageUnsupported.class})
+  @Category(ValidatesRunner.class)
   public void testWindowedContainsInAnyOrder() throws Exception {
     PCollection<Integer> pcollection =
         pipeline

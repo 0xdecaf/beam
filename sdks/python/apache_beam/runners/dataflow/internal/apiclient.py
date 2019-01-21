@@ -478,6 +478,7 @@ class DataflowApplicationClient(object):
 
     request = storage.StorageObjectsInsertRequest(
         bucket=bucket, name=name)
+    start_time = time.time()
     logging.info('Starting GCS upload to %s...', gcs_location)
     upload = storage.Upload(stream, mime_type)
     try:
@@ -493,7 +494,8 @@ class DataflowApplicationClient(object):
                        'access to the specified path.') %
                       (gcs_or_local_path, reportable_errors[e.status_code]))
       raise
-    logging.info('Completed GCS upload to %s', gcs_location)
+    logging.info('Completed GCS upload to %s in %s seconds.', gcs_location,
+                 int(time.time() - start_time))
     return response
 
   @retry.no_retries  # Using no_retries marks this as an integration point.
@@ -847,6 +849,14 @@ def _use_fnapi(pipeline_options):
 
   return standard_options.streaming or (
       debug_options.experiments and 'beam_fn_api' in debug_options.experiments)
+
+
+def _use_unified_worker(pipeline_options):
+  debug_options = pipeline_options.view_as(DebugOptions)
+
+  return _use_fnapi(pipeline_options) and (
+      debug_options.experiments and
+      'use_unified_worker' in debug_options.experiments)
 
 
 def get_default_container_image_for_current_sdk(job_type):

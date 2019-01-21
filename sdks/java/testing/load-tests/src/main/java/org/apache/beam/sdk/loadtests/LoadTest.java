@@ -18,20 +18,32 @@
 package org.apache.beam.sdk.loadtests;
 
 import static org.apache.beam.sdk.io.synthetic.SyntheticOptions.fromJsonString;
+import static org.apache.beam.sdk.loadtests.JobFailure.handleFailure;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
+import com.google.cloud.Timestamp;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.io.synthetic.SyntheticBoundedIO;
+import org.apache.beam.sdk.io.Read;
+import org.apache.beam.sdk.io.synthetic.SyntheticBoundedSource;
+import org.apache.beam.sdk.io.synthetic.SyntheticSourceOptions;
 import org.apache.beam.sdk.io.synthetic.SyntheticStep;
+import org.apache.beam.sdk.io.synthetic.SyntheticUnboundedSource;
 import org.apache.beam.sdk.loadtests.metrics.TimeMonitor;
+import org.apache.beam.sdk.testutils.NamedTestResult;
+import org.apache.beam.sdk.testutils.metrics.MetricsReader;
 import org.apache.beam.sdk.testutils.publishing.BigQueryResultsPublisher;
+import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions;
+import org.joda.time.Duration;
 
 /**
  * Base class for all load tests. Provides common operations such as initializing source/step
@@ -45,7 +57,7 @@ abstract class LoadTest<OptionsT extends LoadTestOptions> {
 
   protected OptionsT options;
 
-  protected SyntheticBoundedIO.SyntheticSourceOptions sourceOptions;
+  protected SyntheticSourceOptions sourceOptions;
 
   protected SyntheticStep.Options stepOptions;
 
@@ -55,10 +67,18 @@ abstract class LoadTest<OptionsT extends LoadTestOptions> {
     this.metricsNamespace = metricsNamespace;
     this.runtimeMonitor = new TimeMonitor<>(metricsNamespace, "runtime");
     this.options = LoadTestOptions.readFromArgs(args, testOptions);
-    this.sourceOptions =
-        fromJsonString(options.getSourceOptions(), SyntheticBoundedIO.SyntheticSourceOptions.class);
+    this.sourceOptions = fromJsonString(options.getSourceOptions(), SyntheticSourceOptions.class);
     this.stepOptions = fromJsonString(options.getStepOptions(), SyntheticStep.Options.class);
     this.pipeline = Pipeline.create(options);
+  }
+
+  PTransform<PBegin, PCollection<KV<byte[], byte[]>>> readFromSource(
+      SyntheticSourceOptions sourceOptions) {
+    if (options.isStreaming()) {
+      return Read.from(new SyntheticUnboundedSource(sourceOptions));
+    } else {
+      return Read.from(new SyntheticBoundedSource(sourceOptions));
+    }
   }
 
   /** The load test pipeline implementation. */
@@ -68,36 +88,55 @@ abstract class LoadTest<OptionsT extends LoadTestOptions> {
    * Runs the load test, collects and publishes test results to various data store and/or console.
    */
   public PipelineResult run() throws IOException {
-    long testStartTime = System.currentTimeMillis();
+    Timestamp timestamp = Timestamp.now();
 
     loadTest();
 
-    PipelineResult result = pipeline.run();
-    result.waitUntilFinish();
+    PipelineResult pipelineResult = pipeline.run();
+    pipelineResult.waitUntilFinish(Duration.standardMinutes(options.getLoadTestTimeout()));
 
-    LoadTestResult testResult = LoadTestResult.create(result, metricsNamespace, testStartTime);
+    String testId = UUID.randomUUID().toString();
+    List metrics = readMetrics(timestamp, pipelineResult, testId);
 
-    ConsoleResultPublisher.publish(testResult);
+    ConsoleResultPublisher.publish(metrics, testId, timestamp.toString());
+
+    handleFailure(pipelineResult, metrics);
 
     if (options.getPublishToBigQuery()) {
-      publishResultToBigQuery(testResult);
+      publishResultsToBigQuery(metrics);
     }
-    return result;
+
+    return pipelineResult;
   }
 
-  private void publishResultToBigQuery(LoadTestResult testResult) {
+  private List<NamedTestResult> readMetrics(
+      Timestamp timestamp, PipelineResult result, String testId) {
+    MetricsReader reader = new MetricsReader(result, metricsNamespace);
+
+    NamedTestResult runtime =
+        NamedTestResult.create(
+            testId,
+            timestamp.toString(),
+            "runtime_sec",
+            (reader.getEndTimeMetric("runtime") - reader.getStartTimeMetric("runtime")) / 1000D);
+
+    NamedTestResult totalBytes =
+        NamedTestResult.create(
+            testId,
+            timestamp.toString(),
+            "total_bytes_count",
+            reader.getCounterMetric("totalBytes.count"));
+
+    return Arrays.asList(runtime, totalBytes);
+  }
+
+  private void publishResultsToBigQuery(List<NamedTestResult> testResults) {
     String dataset = options.getBigQueryDataset();
     String table = options.getBigQueryTable();
     checkBigQueryOptions(dataset, table);
 
-    ImmutableMap<String, String> schema =
-        ImmutableMap.<String, String>builder()
-            .put("timestamp", "timestamp")
-            .put("runtime", "float")
-            .put("total_bytes_count", "integer")
-            .build();
-
-    BigQueryResultsPublisher.create(dataset, schema).publish(testResult, table);
+    BigQueryResultsPublisher.create(dataset, NamedTestResult.getSchema())
+        .publish(testResults, table);
   }
 
   private static void checkBigQueryOptions(String dataset, String table) {

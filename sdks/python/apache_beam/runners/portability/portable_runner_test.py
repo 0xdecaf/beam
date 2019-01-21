@@ -43,11 +43,12 @@ from apache_beam.runners.portability import fn_api_runner_test
 from apache_beam.runners.portability import portable_runner
 from apache_beam.runners.portability.local_job_service import LocalJobServicer
 from apache_beam.runners.portability.portable_runner import PortableRunner
+from apache_beam.runners.worker.channel_factory import GRPCChannelFactory
 
 
 class PortableRunnerTest(fn_api_runner_test.FnApiRunnerTest):
 
-  TIMEOUT_SECS = 30
+  TIMEOUT_SECS = 60
 
   # Controls job service interaction, not sdk harness interaction.
   _use_subprocesses = False
@@ -93,7 +94,7 @@ class PortableRunnerTest(fn_api_runner_test.FnApiRunnerTest):
     cls._subprocess = subprocess.Popen(cls._subprocess_command(port))
     address = 'localhost:%d' % port
     job_service = beam_job_api_pb2_grpc.JobServiceStub(
-        grpc.insecure_channel(address))
+        GRPCChannelFactory.insecure_channel(address))
     logging.info('Waiting for server to be ready...')
     start = time.time()
     timeout = 30

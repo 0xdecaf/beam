@@ -17,16 +17,11 @@
  */
 package org.apache.beam.runners.direct.portable;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static org.apache.beam.runners.core.construction.SyntheticComponents.uniqueId;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Iterables.getOnlyElement;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
@@ -86,7 +81,12 @@ import org.apache.beam.sdk.fn.IdGenerator;
 import org.apache.beam.sdk.fn.IdGenerators;
 import org.apache.beam.sdk.fn.stream.OutboundObserverFactory;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.vendor.grpc.v1_13_1.com.google.protobuf.Struct;
+import org.apache.beam.vendor.grpc.v1p13p1.com.google.protobuf.Struct;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Sets;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
@@ -279,10 +279,8 @@ public class ReferenceRunner {
                 .getWindowingStrategiesOrThrow(input.getWindowingStrategyId())
                 .getWindowCoderId();
         // This coder isn't actually required for the pipeline to function properly - the KWIs can
-        // be
-        // passed around as pure java objects with no coding of the values, but it approximates a
-        // full
-        // pipeline.
+        // be passed around as pure java objects with no coding of the values, but it approximates
+        // a full pipeline.
         Coder kwiCoder =
             Coder.newBuilder()
                 .setSpec(
@@ -479,8 +477,7 @@ public class ReferenceRunner {
     QueryablePipeline q = QueryablePipeline.forPipeline(p);
     String feedSdfUrn = SplittableRemoteStageEvaluatorFactory.FEED_SDF_URN;
     List<PTransformNode> feedSDFNodes =
-        q.getTransforms()
-            .stream()
+        q.getTransforms().stream()
             .filter(node -> node.getTransform().getSpec().getUrn().equals(feedSdfUrn))
             .collect(Collectors.toList());
     Map<String, PTransformNode> stageToFeeder = Maps.newHashMap();

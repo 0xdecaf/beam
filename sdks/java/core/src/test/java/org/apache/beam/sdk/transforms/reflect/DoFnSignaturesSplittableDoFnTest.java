@@ -22,7 +22,6 @@ import static org.apache.beam.sdk.transforms.reflect.DoFnSignaturesTestUtils.err
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-import com.google.common.base.Predicates;
 import java.util.List;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StructuredCoder;
@@ -37,6 +36,7 @@ import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.base.Predicates;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -85,9 +85,7 @@ public class DoFnSignaturesSplittableDoFnTest {
 
     assertTrue(signature.isSplittable());
     assertTrue(
-        signature
-            .extraParameters()
-            .stream()
+        signature.extraParameters().stream()
             .anyMatch(
                 Predicates.instanceOf(DoFnSignature.Parameter.RestrictionTrackerParameter.class)
                     ::apply));
@@ -114,8 +112,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testInfersBoundednessFromAnnotation() throws Exception {
     class BaseSplittableFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void processElement(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void processElement(ProcessContext context, SomeRestrictionTracker tracker) {}
 
       @GetInitialRestriction
       public SomeRestriction getInitialRestriction(Integer element) {
@@ -142,8 +139,7 @@ public class DoFnSignaturesSplittableDoFnTest {
 
   private static class BaseFnWithoutContinuation extends DoFn<Integer, String> {
     @ProcessElement
-    public void processElement(
-        ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+    public void processElement(ProcessContext context, SomeRestrictionTracker tracker) {}
 
     @GetInitialRestriction
     public SomeRestriction getInitialRestriction(Integer element) {
@@ -154,7 +150,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   private static class BaseFnWithContinuation extends DoFn<Integer, String> {
     @ProcessElement
     public ProcessContinuation processElement(
-        ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {
+        ProcessContext context, SomeRestrictionTracker tracker) {
       return null;
     }
 
@@ -233,7 +229,7 @@ public class DoFnSignaturesSplittableDoFnTest {
     class GoodSplittableDoFn extends DoFn<Integer, String> {
       @ProcessElement
       public ProcessContinuation processElement(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {
+          ProcessContext context, SomeRestrictionTracker tracker) {
         return null;
       }
 
@@ -261,7 +257,7 @@ public class DoFnSignaturesSplittableDoFnTest {
     }
 
     DoFnSignature signature = DoFnSignatures.getSignature(GoodSplittableDoFn.class);
-    assertEquals(RestrictionTracker.class, signature.processElement().trackerT().getRawType());
+    assertEquals(SomeRestrictionTracker.class, signature.processElement().trackerT().getRawType());
     assertTrue(signature.processElement().isSplittable());
     assertTrue(signature.processElement().hasReturnValue());
     assertEquals(
@@ -310,15 +306,14 @@ public class DoFnSignaturesSplittableDoFnTest {
     DoFnSignature signature =
         DoFnSignatures.getSignature(
             new GoodGenericSplittableDoFn<
-                SomeRestriction, RestrictionTracker<SomeRestriction, ?>,
-                SomeRestrictionCoder>() {}.getClass());
-    assertEquals(RestrictionTracker.class, signature.processElement().trackerT().getRawType());
+                SomeRestriction, SomeRestrictionTracker, SomeRestrictionCoder>() {}.getClass());
+    assertEquals(SomeRestrictionTracker.class, signature.processElement().trackerT().getRawType());
     assertTrue(signature.processElement().isSplittable());
     assertTrue(signature.processElement().hasReturnValue());
     assertEquals(
         SomeRestriction.class, signature.getInitialRestriction().restrictionT().getRawType());
     assertEquals(SomeRestriction.class, signature.splitRestriction().restrictionT().getRawType());
-    assertEquals(RestrictionTracker.class, signature.newTracker().trackerT().getRawType());
+    assertEquals(SomeRestrictionTracker.class, signature.newTracker().trackerT().getRawType());
     assertEquals(SomeRestriction.class, signature.newTracker().restrictionT().getRawType());
     assertEquals(SomeRestrictionCoder.class, signature.getRestrictionCoder().coderT().getRawType());
   }
@@ -327,8 +322,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testSplittableMissingRequiredMethods() throws Exception {
     class BadFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void process(ProcessContext context, SomeRestrictionTracker tracker) {}
     }
 
     thrown.expectMessage(
@@ -347,8 +341,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testHasDefaultTracker() throws Exception {
     class Fn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext c, RestrictionTracker<RestrictionWithDefaultTracker, Void> tracker) {}
+      public void process(ProcessContext c, SomeDefaultTracker tracker) {}
 
       @GetInitialRestriction
       public RestrictionWithDefaultTracker getInitialRestriction(Integer element) {
@@ -357,7 +350,7 @@ public class DoFnSignaturesSplittableDoFnTest {
     }
 
     DoFnSignature signature = DoFnSignatures.getSignature(Fn.class);
-    assertEquals(RestrictionTracker.class, signature.processElement().trackerT().getRawType());
+    assertEquals(SomeDefaultTracker.class, signature.processElement().trackerT().getRawType());
   }
 
   @Test
@@ -373,8 +366,11 @@ public class DoFnSignaturesSplittableDoFnTest {
     }
 
     thrown.expectMessage(
-        "Has tracker type SomeRestrictionTracker, "
-            + "but the DoFn's tracker type must be of type RestrictionTracker.");
+        "Has tracker type SomeRestrictionTracker, but the DoFn's tracker type was inferred as ");
+    thrown.expectMessage("SomeDefaultTracker");
+    thrown.expectMessage(
+        "from restriction type RestrictionWithDefaultTracker "
+            + "of @GetInitialRestriction method getInitialRestriction(Integer)");
     DoFnSignatures.getSignature(Fn.class);
   }
 
@@ -382,8 +378,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testNewTrackerReturnsWrongType() throws Exception {
     class BadFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void process(ProcessContext context, SomeRestrictionTracker tracker) {}
 
       @NewTracker
       public void newTracker(SomeRestriction restriction) {}
@@ -403,8 +398,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testGetInitialRestrictionMismatchesNewTracker() throws Exception {
     class BadFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void process(ProcessContext context, SomeRestrictionTracker tracker) {}
 
       @NewTracker
       public SomeRestrictionTracker newTracker(SomeRestriction restriction) {
@@ -427,8 +421,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   public void testGetRestrictionCoderReturnsWrongType() throws Exception {
     class BadFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void process(ProcessContext context, SomeRestrictionTracker tracker) {}
 
       @NewTracker
       public SomeRestrictionTracker newTracker(SomeRestriction restriction) {
@@ -536,8 +529,7 @@ public class DoFnSignaturesSplittableDoFnTest {
 
     class BadFn extends DoFn<Integer, String> {
       @ProcessElement
-      public void process(
-          ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+      public void process(ProcessContext context, SomeRestrictionTracker tracker) {}
 
       @NewTracker
       public SomeRestrictionTracker newTracker(SomeRestriction restriction) {

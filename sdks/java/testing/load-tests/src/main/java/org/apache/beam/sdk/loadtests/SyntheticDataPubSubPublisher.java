@@ -17,11 +17,12 @@
  */
 package org.apache.beam.sdk.loadtests;
 
-import static org.apache.beam.sdk.io.synthetic.SyntheticBoundedIO.SyntheticBoundedSource;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.beam.sdk.util.CoderUtils.encodeToByteArray;
 
 import java.io.IOException;
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.CoderException;
@@ -29,8 +30,9 @@ import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
-import org.apache.beam.sdk.io.synthetic.SyntheticBoundedIO.SyntheticSourceOptions;
+import org.apache.beam.sdk.io.synthetic.SyntheticBoundedSource;
 import org.apache.beam.sdk.io.synthetic.SyntheticOptions;
+import org.apache.beam.sdk.io.synthetic.SyntheticSourceOptions;
 import org.apache.beam.sdk.options.ApplicationNameOptions;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -93,7 +95,7 @@ public class SyntheticDataPubSubPublisher {
       extends SimpleFunction<KV<byte[], byte[]>, PubsubMessage> {
     @Override
     public PubsubMessage apply(KV<byte[], byte[]> input) {
-      return new PubsubMessage(encodeInputElement(input), Collections.emptyMap());
+      return new PubsubMessage(encodeInputElement(input), encodeInputElementToMapOfStrings(input));
     }
   }
 
@@ -103,5 +105,13 @@ public class SyntheticDataPubSubPublisher {
     } catch (CoderException e) {
       throw new RuntimeException(String.format("Couldn't encode element. Exception: %s", e));
     }
+  }
+
+  private static Map<String, String> encodeInputElementToMapOfStrings(KV<byte[], byte[]> input) {
+    String key = new String(input.getKey(), UTF_8);
+    String value = new String(input.getValue(), UTF_8);
+    HashMap<String, String> map = new HashMap<>();
+    map.put(key, value);
+    return map;
   }
 }

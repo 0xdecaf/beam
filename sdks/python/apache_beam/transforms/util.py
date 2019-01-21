@@ -33,6 +33,7 @@ from future.utils import itervalues
 
 from apache_beam import typehints
 from apache_beam.metrics import Metrics
+from apache_beam.portability import common_urns
 from apache_beam.transforms import window
 from apache_beam.transforms.core import CombinePerKey
 from apache_beam.transforms.core import DoFn
@@ -281,9 +282,11 @@ class _BatchSizeEstimator(object):
     n = float(len(xs))
     xbar = sum(xs) / n
     ybar = sum(ys) / n
-    if [xs[0]] * len(xs) == xs:
+    if xbar == 0:
+      return ybar, 0
+    if all(xs[0] == x for x in xs):
       # Simply use the mean if all values in xs are same.
-      return 0, ybar/xbar
+      return 0, ybar / xbar
     b = (sum([(x - xbar) * (y - ybar) for x, y in zip(xs, ys)])
          / sum([(x - xbar)**2 for x in xs]))
     a = ybar - b * xbar
@@ -295,7 +298,7 @@ class _BatchSizeEstimator(object):
     import numpy as np
     from numpy import sum
     n = len(xs)
-    if [xs[0]] * n == xs:
+    if all(xs[0] == x for x in xs):
       # If all values of xs are same then fallback to linear_regression_no_numpy
       return _BatchSizeEstimator.linear_regression_no_numpy(xs, ys)
     xs = np.asarray(xs, dtype=float)
@@ -634,3 +637,10 @@ class Reshuffle(PTransform):
             | 'AddRandomKeys' >> Map(lambda t: (random.getrandbits(32), t))
             | ReshufflePerKey()
             | 'RemoveRandomKeys' >> Map(lambda t: t[1]))
+
+  def to_runner_api_parameter(self, unused_context):
+    return common_urns.composites.RESHUFFLE.urn, None
+
+  @PTransform.register_urn(common_urns.composites.RESHUFFLE.urn, None)
+  def from_runner_api_parameter(unused_parameter, unused_context):
+    return Reshuffle()

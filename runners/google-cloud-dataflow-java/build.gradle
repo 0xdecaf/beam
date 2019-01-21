@@ -39,7 +39,7 @@ processResources {
   filter org.apache.tools.ant.filters.ReplaceTokens, tokens: [
     'dataflow.legacy_environment_major_version' : '7',
     'dataflow.fnapi_environment_major_version' : '7',
-    'dataflow.container_version' : 'beam-master-20181128'
+    'dataflow.container_version' : 'beam-master-20190110'
   ]
 }
 
@@ -57,7 +57,7 @@ configurations {
 }
 
 dependencies {
-  compile library.java.guava
+  shadow library.java.vendored_guava_20_0
   shadow project(path: ":beam-model-pipeline", configuration: "shadow")
   shadow project(path: ":beam-sdks-java-core", configuration: "shadow")
   shadow project(path: ":beam-sdks-java-extensions-google-cloud-platform-core", configuration: "shadow")
@@ -109,6 +109,8 @@ test {
 def dataflowProject = project.findProperty('dataflowProject') ?: 'apache-beam-testing'
 def dataflowValidatesTempRoot = project.findProperty('dataflowTempRoot') ?: 'gs://temp-storage-for-validates-runner-tests/'
 def dataflowPostCommitTempRoot = project.findProperty('dataflowTempRoot') ?: 'gs://temp-storage-for-end-to-end-tests'
+def dataflowUploadTemp = project.findProperty('dataflowTempRoot') ?: 'gs://temp-storage-for-upload-tests'
+def testFilesToStage = project.findProperty('filesToStage') ?: 'test.txt'
 def dataflowLegacyWorkerJar = project.findProperty('dataflowWorkerJar') ?: project(":beam-runners-google-cloud-dataflow-java-legacy-worker").shadowJar.archivePath
 def dataflowFnApiWorkerJar = project.findProperty('dataflowWorkerJar') ?: project(":beam-runners-google-cloud-dataflow-java-fn-api-worker").shadowJar.archivePath
 
@@ -275,8 +277,6 @@ task validatesRunnerFnApiWorkerExecutableStageTest(type: Test) {
         excludeCategories 'org.apache.beam.sdk.testing.UsesSideInputs'
         // TODO(BEAM-6233): Support timer and state.
         excludeCategories 'org.apache.beam.sdk.testing.UsesStatefulParDo'
-        // TODO(BEAM-6231): Triage failures.
-        excludeCategories 'org.apache.beam.sdk.testing.DataflowPortabilityExecutableStageUnsupported'
     }
 }
 
@@ -284,12 +284,6 @@ task validatesRunner {
   group = "Verification"
   description "Validates Dataflow runner"
   dependsOn validatesRunnerLegacyWorkerTest
-}
-
-task validatesRunnerPortabilityApiExecutableStage {
-    group = "Verification"
-    description "Validates Dataflow PortabilityApi runner"
-    dependsOn validatesRunnerFnApiWorkerExecutableStageTest
 }
 
 task googleCloudPlatformLegacyWorkerIntegrationTest(type: Test) {
@@ -478,3 +472,11 @@ createJavaExamplesArchetypeValidationTask(type: 'MobileGaming',
   gcsBucket: gcsBucket,
   bqDataset: bqDataset,
   pubsubTopic: pubsubTopic)
+
+// Standalone task for testing GCS upload, use with -PfilesToStage and -PdataflowTempRoot.
+task GCSUpload(type: JavaExec) {
+   main = 'org.apache.beam.runners.dataflow.util.GCSUploadMain'
+   classpath = sourceSets.test.runtimeClasspath
+   args "--stagingLocation=${dataflowUploadTemp}/staging",
+        "--filesToStage=${testFilesToStage}"
+}
