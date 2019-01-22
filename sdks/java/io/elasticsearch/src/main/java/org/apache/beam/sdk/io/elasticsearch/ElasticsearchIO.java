@@ -53,8 +53,6 @@ import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.state.StateSpec;
-import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -957,6 +955,9 @@ public class ElasticsearchIO {
            sliceId < tracker.currentRestriction().getTo();
            ++sliceId) {
 
+        // Cleanup any existing scroll state.
+        deleteScroll();
+
         if(!tracker.tryClaim(sliceId)) {
           LOG.info("Failed to claim {}", sliceId);
           break;
@@ -991,7 +992,7 @@ public class ElasticsearchIO {
         LOG.info("Completed outputting results of offset: {}", sliceId);
       }
       // Processing for the restriction has completed so
-      LOG.info("Completed processing the OffsetRestriction {} Returning ProcessContinuation.stop()", tracker);
+      LOG.info("Completed processing {}: {} Returning ProcessContinuation.stop()", c.element(), tracker);
       return ProcessContinuation.stop();
     }
 
@@ -1056,27 +1057,35 @@ public class ElasticsearchIO {
 
       // We can only use slices if the backend version is >=5
       if (backendVersion >= 5 && this.numSlices == null) {
-        numSlices = 1; // getShardCount(connectionConfiguration);
+        // BUG: When working with the same number of slices as shards some tests aren't succeeding.
+        // Tests work when numSlices == 1
+        // If numslices == 3 the third shard is never retrieved.
+        // TODO: This is an artificial limit, should it exist?
+        numSlices = Math.max(getShardCount(connectionConfiguration), 8);
       }
     }
 
     @Teardown
     public void teardown() throws IOException {
+      deleteScroll();
+
+      if (restClient != null) {
+        restClient.close();
+      }
+    }
+
+    private void deleteScroll() {
+      // remove the scroll
+      if (scrollId == null)
+        return;
+
+      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
+      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
 
       try {
-        // remove the scroll
-        if (scrollId == null)
-          return;
-
-        String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
-        HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-
         restClient.performRequest("DELETE", "/_search/scroll", Collections.emptyMap(), entity);
-      } finally {
-        if (restClient != null) {
-          restClient.close();
-        }
-      }
+      } catch (IOException ignore) { }
+      scrollId = null;
     }
   }
 
