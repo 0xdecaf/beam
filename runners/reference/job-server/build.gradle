@@ -15,7 +15,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-apply plugin: org.apache.beam.gradle.BeamModulePlugin
+plugins {
+  id 'org.apache.beam.module'
+  id 'application'
+}
+// we need to set mainClassName before applying shadow plugin
+mainClassName = "org.apache.beam.runners.direct.portable.job.ReferenceRunnerJobServer"
+
 applyJavaNature(
   exportJavadoc: false,
   validateShadowJar: false,
@@ -24,10 +30,6 @@ applyJavaNature(
 )
 
 description = "Apache Beam :: Runners :: Reference :: Job Server"
-
-apply plugin: "application"
-
-mainClassName = "org.apache.beam.runners.direct.portable.job.ReferenceRunnerJobServer"
 
 dependencies {
   compile project(path: ":beam-runners-direct-java", configuration: "shadow")

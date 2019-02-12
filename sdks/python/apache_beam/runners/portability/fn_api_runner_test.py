@@ -17,19 +17,24 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+import collections
 import logging
 import os
+import random
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import unittest
+import uuid
 from builtins import range
 
 from tenacity import retry
 from tenacity import stop_after_attempt
 
 import apache_beam as beam
+from apache_beam.io import restriction_trackers
 from apache_beam.metrics import monitoring_infos
 from apache_beam.metrics.execution import MetricKey
 from apache_beam.metrics.execution import MetricsEnvironment
@@ -188,12 +193,17 @@ class FnApiRunnerTest(unittest.TestCase):
               (9, list(range(7, 10)))]),
           label='windowed')
 
-  def test_flattened_side_input(self):
+  def test_flattened_side_input(self, with_transcoding=True):
     with self.create_pipeline() as p:
       main = p | 'main' >> beam.Create([None])
       side1 = p | 'side1' >> beam.Create([('a', 1)])
       side2 = p | 'side2' >> beam.Create([('b', 2)])
-      side3 = p | 'side3' >> beam.Create(['another type'])
+      if with_transcoding:
+        # Also test non-matching coder types (transcoding required)
+        third_element = [('another_type')]
+      else:
+        third_element = [('b', 3)]
+      side3 = p | 'side3' >> beam.Create(third_element)
       side = (side1, side2) | beam.Flatten()
       assert_that(
           main | beam.Map(lambda a, b: (a, b), beam.pvalue.AsDict(side)),
@@ -201,7 +211,7 @@ class FnApiRunnerTest(unittest.TestCase):
           label='CheckFlattenAsSideInput')
       assert_that(
           (side, side3) | 'FlattenAfter' >> beam.Flatten(),
-          equal_to([('a', 1), ('b', 2), ('another type')]),
+          equal_to([('a', 1), ('b', 2)] + third_element),
           label='CheckFlattenOfSideInput')
 
   def test_gbk_side_input(self):
@@ -249,7 +259,7 @@ class FnApiRunnerTest(unittest.TestCase):
                    'TODO: BEAM-5692')
   def test_pardo_state_only(self):
     index_state_spec = userstate.CombiningValueStateSpec(
-        'index', beam.coders.VarIntCoder(), sum)
+        'index', beam.coders.IterableCoder(beam.coders.VarIntCoder()), sum)
 
     # TODO(ccy): State isn't detected with Map/FlatMap.
     class AddIndex(beam.DoFn):
@@ -346,6 +356,43 @@ class FnApiRunnerTest(unittest.TestCase):
 
       assert_that(actual, is_buffered_correctly)
 
+  def test_sdf(self):
+
+    class ExpandStringsProvider(beam.transforms.core.RestrictionProvider):
+      def initial_restriction(self, element):
+        return (0, len(element))
+
+      def create_tracker(self, restriction):
+        return restriction_trackers.OffsetRestrictionTracker(
+            restriction[0], restriction[1])
+
+      def split(self, element, restriction):
+        start, end = restriction
+        middle = (end - start) // 2
+        return [(start, middle), (middle, end)]
+
+    class ExpandStringsDoFn(beam.DoFn):
+      def process(self, element, restriction_tracker=ExpandStringsProvider()):
+        assert isinstance(
+            restriction_tracker,
+            restriction_trackers.OffsetRestrictionTracker), restriction_tracker
+        for k in range(*restriction_tracker.current_restriction()):
+          if not restriction_tracker.try_claim(k):
+            return
+          yield element[k]
+          if k % 2 == 1:
+            restriction_tracker.defer_remainder()
+            return
+
+    with self.create_pipeline() as p:
+      data = ['abc', 'defghijklmno', 'pqrstuv', 'wxyz']
+      actual = (
+          p
+          | beam.Create(data)
+          | beam.ParDo(ExpandStringsDoFn()))
+
+      assert_that(actual, equal_to(list(''.join(data))))
+
   def test_group_by_key(self):
     with self.create_pipeline() as p:
       res = (p
@@ -360,12 +407,17 @@ class FnApiRunnerTest(unittest.TestCase):
       assert_that(p | beam.Create([1, 2, 3]) | beam.Reshuffle(),
                   equal_to([1, 2, 3]))
 
-  def test_flatten(self):
+  def test_flatten(self, with_transcoding=True):
     with self.create_pipeline() as p:
+      if with_transcoding:
+        # Additional element which does not match with the first type
+        additional = [ord('d')]
+      else:
+        additional = ['d']
       res = (p | 'a' >> beam.Create(['a']),
              p | 'bc' >> beam.Create(['b', 'c']),
-             p | 'd' >> beam.Create(['d'])) | beam.Flatten()
-      assert_that(res, equal_to(['a', 'b', 'c', 'd']))
+             p | 'd' >> beam.Create(additional)) | beam.Flatten()
+      assert_that(res, equal_to(['a', 'b', 'c'] + additional))
 
   def test_combine_per_key(self):
     with self.create_pipeline() as p:
@@ -702,6 +754,262 @@ class FnApiRunnerTestWithBundleRepeat(FnApiRunnerTest):
   def create_pipeline(self):
     return beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(bundle_repeat=3))
+
+
+class FnApiRunnerSplitTest(unittest.TestCase):
+
+  def create_pipeline(self):
+    # Must be GRPC so we can send data and split requests concurrent
+    # to the bundle process request.
+    return beam.Pipeline(
+        runner=fn_api_runner.FnApiRunner(
+            default_environment=beam_runner_api_pb2.Environment(
+                urn=python_urns.EMBEDDED_PYTHON_GRPC)))
+
+  def test_checkpoint(self):
+    # This split manager will get re-invoked on each smaller split,
+    # so N times for N elements.
+    element_counter = ElementCounter()
+
+    def split_manager(num_elements):
+      # Send at least one element so it can make forward progress.
+      element_counter.reset()
+      breakpoint = element_counter.set_breakpoint(1)
+      # Cede control back to the runner so data can be sent.
+      yield
+      breakpoint.wait()
+      # Split as close to current as possible.
+      split_result = yield 0.0
+      # Verify we split at exactly the first element.
+      self.verify_channel_split(split_result, 0, 1)
+      # Continue processing.
+      breakpoint.clear()
+
+    self.run_split_pipeline(split_manager, list('abc'), element_counter)
+
+  def test_split_half(self):
+    total_num_elements = 25
+    seen_bundle_sizes = []
+    element_counter = ElementCounter()
+
+    def split_manager(num_elements):
+      seen_bundle_sizes.append(num_elements)
+      if num_elements == total_num_elements:
+        element_counter.reset()
+        breakpoint = element_counter.set_breakpoint(5)
+        yield
+        breakpoint.wait()
+        # Split the remainder (20, then 10, elements) in half.
+        split1 = yield 0.5
+        self.verify_channel_split(split1, 14, 15)  # remainder is 15 to end
+        split2 = yield 0.5
+        self.verify_channel_split(split2, 9, 10)   # remainder is 10 to end
+        breakpoint.clear()
+
+    self.run_split_pipeline(
+        split_manager, range(total_num_elements), element_counter)
+    self.assertEqual([25, 15], seen_bundle_sizes)
+
+  def run_split_pipeline(self, split_manager, elements, element_counter=None):
+    with fn_api_runner.split_manager('Identity', split_manager):
+      with self.create_pipeline() as p:
+        res = (p
+               | beam.Create(elements)
+               | beam.Reshuffle()
+               | 'Identity' >> beam.Map(lambda x: x)
+               | beam.Map(lambda x: element_counter.increment() or x))
+        assert_that(res, equal_to(elements))
+
+  def test_nosplit_sdf(self):
+    def split_manager(num_elements):
+      yield
+
+    elements = [1, 2, 3]
+    expected_groups = [[(e, k) for k in range(e)] for e in elements]
+    self.run_sdf_split_pipeline(
+        split_manager, elements, ElementCounter(), expected_groups)
+
+  def test_checkpoint_sdf(self):
+    element_counter = ElementCounter()
+
+    def split_manager(num_elements):
+      element_counter.reset()
+      breakpoint = element_counter.set_breakpoint(1)
+      yield
+      breakpoint.wait()
+      yield 0
+      breakpoint.clear()
+
+    # Everything should be perfectly split.
+    elements = [2, 3]
+    expected_groups = [[(2, 0)], [(2, 1)], [(3, 0)], [(3, 1)], [(3, 2)]]
+    self.run_sdf_split_pipeline(
+        split_manager, elements, element_counter, expected_groups)
+
+  def test_split_half_sdf(self):
+
+    element_counter = ElementCounter()
+    is_first_bundle = [True]  # emulate nonlocal for Python 2
+
+    def split_manager(num_elements):
+      if is_first_bundle:
+        del is_first_bundle[:]
+        breakpoint = element_counter.set_breakpoint(1)
+        yield
+        breakpoint.wait()
+        split1 = yield 0.5
+        split2 = yield 0.5
+        split3 = yield 0.5
+        self.verify_channel_split(split1, 0, 1)
+        self.verify_channel_split(split2, -1, 1)
+        self.verify_channel_split(split3, -1, 1)
+        breakpoint.clear()
+
+    elements = [4, 4]
+    expected_groups = [
+        [(4, 0)],
+        [(4, 1)],
+        [(4, 2), (4, 3)],
+        [(4, 0), (4, 1), (4, 2), (4, 3)]]
+
+    self.run_sdf_split_pipeline(
+        split_manager, elements, element_counter, expected_groups)
+
+  def test_split_crazy_sdf(self, seed=None):
+    if seed is None:
+      seed = random.randrange(1 << 20)
+    r = random.Random(seed)
+    element_counter = ElementCounter()
+
+    def split_manager(num_elements):
+      element_counter.reset()
+      wait_for = r.randrange(num_elements)
+      breakpoint = element_counter.set_breakpoint(wait_for)
+      yield
+      breakpoint.wait()
+      yield r.random()
+      yield r.random()
+      breakpoint.clear()
+
+    try:
+      elements = [r.randrange(5, 10) for _ in range(5)]
+      self.run_sdf_split_pipeline(split_manager, elements, element_counter)
+    except Exception:
+      logging.error('test_split_crazy_sdf.seed = %s', seed)
+      raise
+
+  def run_sdf_split_pipeline(
+      self, split_manager, elements, element_counter, expected_groups=None):
+    # Define an SDF that for each input x produces [(x, k) for k in range(x)].
+
+    class EnumerateProvider(beam.transforms.core.RestrictionProvider):
+      def initial_restriction(self, element):
+        return (0, element)
+
+      def create_tracker(self, restriction):
+        return restriction_trackers.OffsetRestrictionTracker(
+            *restriction)
+
+      def split(self, element, restriction):
+        # Don't do any initial splitting to simplify test.
+        return [restriction]
+
+    class EnumerateSdf(beam.DoFn):
+      def process(self, element, restriction_tracker=EnumerateProvider()):
+        to_emit = []
+        for k in range(*restriction_tracker.current_restriction()):
+          if restriction_tracker.try_claim(k):
+            to_emit.append((element, k))
+            element_counter.increment()
+          else:
+            break
+        # Emitting in batches for tighter testing.
+        yield to_emit
+
+    expected = [(e, k) for e in elements for k in range(e)]
+
+    with fn_api_runner.split_manager('SDF', split_manager):
+      with self.create_pipeline() as p:
+        grouped = (
+            p
+            | beam.Create(elements)
+            | 'SDF' >> beam.ParDo(EnumerateSdf()))
+        flat = grouped | beam.FlatMap(lambda x: x)
+        assert_that(flat, equal_to(expected))
+        if expected_groups:
+          assert_that(grouped, equal_to(expected_groups), label='CheckGrouped')
+
+  def verify_channel_split(self, split_result, last_primary, first_residual):
+    self.assertEqual(1, len(split_result.channel_splits), split_result)
+    channel_split, = split_result.channel_splits
+    self.assertEqual(last_primary, channel_split.last_primary_element)
+    self.assertEqual(first_residual, channel_split.first_residual_element)
+    # There should be a primary and residual application for each element
+    # not covered above.
+    self.assertEqual(
+        first_residual - last_primary - 1,
+        len(split_result.primary_roots),
+        split_result.primary_roots)
+    self.assertEqual(
+        first_residual - last_primary - 1,
+        len(split_result.residual_roots),
+        split_result.residual_roots)
+
+
+class ElementCounter(object):
+  """Used to wait until a certain number of elements are seen."""
+
+  def __init__(self):
+    self._cv = threading.Condition()
+    self.reset()
+
+  def reset(self):
+    with self._cv:
+      self._breakpoints = collections.defaultdict(list)
+      self._count = 0
+
+  def increment(self):
+    with self._cv:
+      self._count += 1
+      self._cv.notify_all()
+      breakpoints = list(self._breakpoints[self._count])
+    for breakpoint in breakpoints:
+      breakpoint.wait()
+
+  def set_breakpoint(self, value):
+    with self._cv:
+      event = threading.Event()
+      self._breakpoints[value].append(event)
+
+    class Breakpoint(object):
+      @staticmethod
+      def wait(timeout=10):
+        with self._cv:
+          start = time.time()
+          while self._count < value:
+            elapsed = time.time() - start
+            if elapsed > timeout:
+              raise RuntimeError('Timed out waiting for %s' % value)
+            self._cv.wait(timeout - elapsed)
+
+      @staticmethod
+      def clear():
+        event.set()
+
+    return Breakpoint()
+
+  def __reduce__(self):
+    # Ensure we get the same element back through a pickling round-trip.
+    name = uuid.uuid4().hex
+    _pickled_element_counters[name] = self
+    return _unpickle_element_counter, (name,)
+
+
+_pickled_element_counters = {}
+
+
+def _unpickle_element_counter(name):
+  return _pickled_element_counters[name]
 
 
 if __name__ == '__main__':

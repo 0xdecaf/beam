@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.transforms.splittabledofn;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkState;
 
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Internal;
@@ -27,13 +27,6 @@ import org.apache.beam.sdk.transforms.DoFn;
 /**
  * Manages concurrent access to the restriction and keeps track of its claimed part for a <a
  * href="https://s.apache.org/splittable-do-fn">splittable</a> {@link DoFn}.
- *
- * <p>Restriction trackers which can provide an estimate for the known amount of outstanding work
- * should implement {@link Backlogs.HasBacklog} to provide information that can be used during
- * progress reporting and splitting by runners to improve the performance of the pipeline and
- * increase resource utilization. See <a
- * href="https://s.apache.org/beam-bundles-backlog-splitting">Bundles w/ SplittableDoFns: Backlog
- * &amp; Splitting</a> for further details.
  */
 public abstract class RestrictionTracker<RestrictionT, PositionT> {
   /** Internal interface allowing a runner to observe the calls to {@link #tryClaim}. */
@@ -121,4 +114,6 @@ public abstract class RestrictionTracker<RestrictionT, PositionT> {
    * work remaining in the restriction.
    */
   public abstract void checkDone() throws IllegalStateException;
+
+  // TODO: Add the more general splitRemainderAfterFraction() and other methods.
 }

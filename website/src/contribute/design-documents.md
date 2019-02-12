@@ -67,6 +67,7 @@ This is a collection of documents that may or may not be up to date.
 - Exactly-once Kafka sink [[doc](https://lists.apache.org/thread.html/fb394e576e6e858205307b033c5a5c6cc3923a17606814a54036c570@%3Cdev.beam.apache.org%3E)]
 
 ### Metrics
+- Get Metrics API: Metric Extraction via proto RPC API. [[doc](https://s.apache.org/get-metrics-api)]
 - Metrics API [[doc](http://s.apache.org/beam-metrics-api)]
 - I/O Metrics [[doc](https://s.apache.org/standard-io-metrics)]
 - Metrics extraction independent from runners / execution engines [[doc](https://s.apache.org/runner_independent_metrics_extraction)]
@@ -77,15 +78,16 @@ This is a collection of documents that may or may not be up to date.
 - Runner Authoring Guide [[doc](https://s.apache.org/beam-runner-guide)] (obsoletes [[doc](http://s.apache.org/beam-runner-api)] and [[doc](https://s.apache.org/beam-runner-1-pager)])
 - Composite PInputs, POutputs, and the Runner API [[doc](https://s.apache.org/beam-runner-composites)]
 - Side Input Architecture for Apache Beam [[doc](https://s.apache.org/beam-side-inputs-1-pager)]
+- Runner supported features plugin [[doc](https://s.apache.org/k79W)]
 
 ### SQL / Schema
 - Streams and Tables [[doc](https://s.apache.org/beam-streams-tables)]
 - Streaming SQL [[doc](http://s.apache.org/streaming-sql-spec)]
 - Schema-Aware PCollections [[doc](https://docs.google.com/document/d/1tnG2DPHZYbsomvihIpXruUmQ12pHGK0QIvXS1FOTgRc)]
-- Pubsub to Beam SQL [[doc](https://docs.google.com/document/d/1wIXTxh-nQ3u694XbF0iEZX_7-b3yi4ad0ML2pcAxYfE)]
+- Pubsub to Beam SQL [[doc](https://docs.google.com/document/d/1554kJD33ovkBDvSNjasHu90L_EZOS26ZHr4ao1muS-A)]
 - Apache Beam Proposal: design of DSL SQL interface [[doc](https://docs.google.com/document/d/1uWXL_yF3UUO5GfCxbL6kWsmC8xCWfICU3RwiQKsk7Mk)]
-- Calcite/Beam SQL Windowing [[doc](https://docs.google.com/document/d/1RmyV9e1Qab-axsLI1WWpw5oGAJDv0X7y9OSnPnrZWJk)]
-- Reject Unsupported Windowing Strategies in JOIN [[doc](https://docs.google.com/document/d/1V-ZgKVTwHdNSGlQWncWIzcf_Rw2oLKZFSkU43scLff4)]
+- Calcite/Beam SQL Windowing [[doc](https://docs.google.com/document/d/1yuG_fAnbAKEq3qz2jdf8qxyEIZ3xJAbCF1bbd_Y9Ia8)]
+- Reject Unsupported Windowing Strategies in JOIN [[doc](https://docs.google.com/document/d/1Me0orPfH6vEFjfsTGcZ5ELWg-sw4st1ZvXqYyr7Pexc)]
 - Beam DSL_SQL branch API review [[doc](https://s.apache.org/beam-sql-dsl-api-review)]
 - Complex Types Support for Beam SQL DDL [[mail](https://lists.apache.org/thread.html/c494e521cb6865b1ae19a68e8e653afc562df7744e8d08087249cbe0@%3Cdev.beam.apache.org%3E)]
 - [SQL] Reject unsupported inputs to Joins [[mail](https://lists.apache.org/thread.html/e7a442fa9cf6b76a5b435493170508f6c42fb9ccef9bcef434424f79@%3Cdev.beam.apache.org%3E)]

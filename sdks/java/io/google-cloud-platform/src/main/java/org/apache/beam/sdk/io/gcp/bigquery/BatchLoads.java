@@ -91,11 +91,11 @@ class BatchLoads<DestinationT>
 
   @VisibleForTesting
   // Maximum number of files in a single partition.
-  static final int MAX_NUM_FILES = 10000;
+  static final int DEFAULT_MAX_FILES_PER_PARTITION = 10000;
 
   @VisibleForTesting
   // Maximum number of bytes in a single partition -- 11 TiB just under BQ's 12 TiB limit.
-  static final long MAX_SIZE_BYTES = 11 * (1L << 40);
+  static final long DEFAULT_MAX_BYTES_PER_PARTITION = 11 * (1L << 40);
 
   // The maximum size of a single file - 4TiB, just under the 5 TiB limit.
   static final long DEFAULT_MAX_FILE_SIZE = 4 * (1L << 40);
@@ -123,10 +123,13 @@ class BatchLoads<DestinationT>
   private final Coder<DestinationT> destinationCoder;
   private int maxNumWritersPerBundle;
   private long maxFileSize;
+  private int maxFilesPerPartition;
+  private long maxBytesPerPartition;
   private int numFileShards;
   private Duration triggeringFrequency;
   private ValueProvider<String> customGcsTempLocation;
   private ValueProvider<String> loadJobProjectId;
+  private String kmsKey;
 
   // The maximum number of times to retry failed load or copy jobs.
   private int maxRetryJobs = DEFAULT_MAX_RETRY_JOBS;
@@ -139,7 +142,8 @@ class BatchLoads<DestinationT>
       Coder<DestinationT> destinationCoder,
       ValueProvider<String> customGcsTempLocation,
       @Nullable ValueProvider<String> loadJobProjectId,
-      boolean ignoreUnknownValues) {
+      boolean ignoreUnknownValues,
+      @Nullable String kmsKey) {
     bigQueryServices = new BigQueryServicesImpl();
     this.writeDisposition = writeDisposition;
     this.createDisposition = createDisposition;
@@ -149,10 +153,13 @@ class BatchLoads<DestinationT>
     this.maxNumWritersPerBundle = DEFAULT_MAX_NUM_WRITERS_PER_BUNDLE;
     this.maxFileSize = DEFAULT_MAX_FILE_SIZE;
     this.numFileShards = DEFAULT_NUM_FILE_SHARDS;
+    this.maxFilesPerPartition = DEFAULT_MAX_FILES_PER_PARTITION;
+    this.maxBytesPerPartition = DEFAULT_MAX_BYTES_PER_PARTITION;
     this.triggeringFrequency = null;
     this.customGcsTempLocation = customGcsTempLocation;
     this.loadJobProjectId = loadJobProjectId;
     this.ignoreUnknownValues = ignoreUnknownValues;
+    this.kmsKey = kmsKey;
   }
 
   void setTestServices(BigQueryServices bigQueryServices) {
@@ -188,6 +195,16 @@ class BatchLoads<DestinationT>
   @VisibleForTesting
   void setMaxFileSize(long maxFileSize) {
     this.maxFileSize = maxFileSize;
+  }
+
+  @VisibleForTesting
+  void setMaxFilesPerPartition(int maxFilesPerPartition) {
+    this.maxFilesPerPartition = maxFilesPerPartition;
+  }
+
+  @VisibleForTesting
+  void setMaxBytesPerPartition(long maxBytesPerPartition) {
+    this.maxBytesPerPartition = maxBytesPerPartition;
   }
 
   @Override
@@ -278,6 +295,8 @@ class BatchLoads<DestinationT>
                             singletonTable,
                             dynamicDestinations,
                             tempFilePrefixView,
+                            maxFilesPerPartition,
+                            maxBytesPerPartition,
                             multiPartitionsTag,
                             singlePartitionTag))
                     .withSideInputs(tempFilePrefixView)
@@ -303,7 +322,8 @@ class BatchLoads<DestinationT>
                         loadJobIdPrefixView,
                         writeDisposition,
                         createDisposition,
-                        maxRetryJobs))
+                        maxRetryJobs,
+                        kmsKey))
                 .withSideInputs(loadJobIdPrefixView));
     writeSinglePartition(partitions.get(singlePartitionTag), loadJobIdPrefixView);
     return writeResult(p);
@@ -345,6 +365,8 @@ class BatchLoads<DestinationT>
                             singletonTable,
                             dynamicDestinations,
                             tempFilePrefixView,
+                            maxFilesPerPartition,
+                            maxBytesPerPartition,
                             multiPartitionsTag,
                             singlePartitionTag))
                     .withSideInputs(tempFilePrefixView)
@@ -363,7 +385,8 @@ class BatchLoads<DestinationT>
                         loadJobIdPrefixView,
                         writeDisposition,
                         createDisposition,
-                        maxRetryJobs))
+                        maxRetryJobs,
+                        kmsKey))
                 .withSideInputs(loadJobIdPrefixView));
     writeSinglePartition(partitions.get(singlePartitionTag), loadJobIdPrefixView);
     return writeResult(p);
@@ -515,7 +538,8 @@ class BatchLoads<DestinationT>
             ShardedKeyCoder.of(NullableCoder.of(destinationCoder)),
             ListCoder.of(StringUtf8Coder.of()));
 
-    // If WriteBundlesToFiles produced more than MAX_NUM_FILES files or MAX_SIZE_BYTES bytes, then
+    // If WriteBundlesToFiles produced more than DEFAULT_MAX_FILES_PER_PARTITION files or
+    // DEFAULT_MAX_BYTES_PER_PARTITION bytes, then
     // the import needs to be split into multiple partitions, and those partitions will be
     // specified in multiPartitionsTag.
     return input
@@ -526,7 +550,7 @@ class BatchLoads<DestinationT>
         .apply(
             "MultiPartitionsWriteTables",
             new WriteTables<>(
-                false,
+                true,
                 bigQueryServices,
                 jobIdTokenView,
                 WriteDisposition.WRITE_EMPTY,
@@ -535,7 +559,8 @@ class BatchLoads<DestinationT>
                 dynamicDestinations,
                 loadJobProjectId,
                 maxRetryJobs,
-                ignoreUnknownValues));
+                ignoreUnknownValues,
+                kmsKey));
   }
 
   // In the case where the files fit into a single load job, there's no need to write temporary
@@ -558,7 +583,7 @@ class BatchLoads<DestinationT>
         .apply(
             "SinglePartitionWriteTables",
             new WriteTables<>(
-                true,
+                false,
                 bigQueryServices,
                 loadJobIdPrefixView,
                 writeDisposition,
@@ -567,7 +592,8 @@ class BatchLoads<DestinationT>
                 dynamicDestinations,
                 loadJobProjectId,
                 maxRetryJobs,
-                ignoreUnknownValues));
+                ignoreUnknownValues,
+                kmsKey));
   }
 
   private WriteResult writeResult(Pipeline p) {
