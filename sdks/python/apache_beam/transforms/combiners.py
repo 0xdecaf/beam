@@ -465,19 +465,21 @@ class TopCombineFn(core.CombineFn):
       buffer.append(element)
       if lt(element_key, threshold):  # element_key < threshold
         return element_key, buffer
-      return accumulator  # with mutated buffer
+      else:
+        return accumulator  # with mutated buffer
     elif lt(threshold, element_key):  # threshold < element_key
       buffer.append(element)
       if len(buffer) < self._buffer_size:
-        return accumulator
-      self._sort_buffer(buffer, lt)
-      min_element = buffer[-self._n]
-      threshold = self._key_fn(min_element) if self._key_fn else min_element
-      return threshold, buffer[-self._n:]
-    return accumulator
+        return accumulator  # with mutated buffer
+      else:
+        self._sort_buffer(buffer, lt)
+        min_element = buffer[-self._n]
+        threshold = self._key_fn(min_element) if self._key_fn else min_element
+        return threshold, buffer[-self._n:]
+    else:
+      return accumulator
 
   def merge_accumulators(self, accumulators, *args, **kwargs):
-    accumulators = list(accumulators)
     if args or kwargs:
       add_input = lambda accumulator, element: self.add_input(
           accumulator, element, *args, **kwargs)
@@ -492,6 +494,21 @@ class TopCombineFn(core.CombineFn):
         for element in accumulator[1]:
           total_accumulator = add_input(total_accumulator, element)
     return total_accumulator
+
+  def compact(self, accumulator, *args, **kwargs):
+    if args or kwargs:
+      lt = lambda a, b: self._compare(a, b, *args, **kwargs)
+    else:
+      lt = self._compare
+
+    _, buffer = accumulator
+    if len(buffer) <= self._n:
+      return accumulator  # No compaction needed.
+    else:
+      self._sort_buffer(buffer, lt)
+      min_element = buffer[-self._n]
+      threshold = self._key_fn(min_element) if self._key_fn else min_element
+      return threshold, buffer[-self._n:]
 
   def extract_output(self, accumulator, *args, **kwargs):
     if args or kwargs:
@@ -522,15 +539,35 @@ class Sample(object):
   """Combiners for sampling n elements without replacement."""
   # pylint: disable=no-self-argument
 
-  @staticmethod
-  @ptransform.ptransform_fn
-  def FixedSizeGlobally(pcoll, n):
-    return pcoll | core.CombineGlobally(SampleCombineFn(n))
+  class FixedSizeGlobally(ptransform.PTransform):
+    """Sample n elements from the input PCollection without replacement."""
 
-  @staticmethod
-  @ptransform.ptransform_fn
-  def FixedSizePerKey(pcoll, n):
-    return pcoll | core.CombinePerKey(SampleCombineFn(n))
+    def __init__(self, n):
+      self._n = n
+
+    def expand(self, pcoll):
+      return pcoll | core.CombineGlobally(SampleCombineFn(self._n))
+
+    def display_data(self):
+      return {'n': self._n}
+
+    def default_label(self):
+      return 'FixedSizeGlobally(%d)' % self._n
+
+  class FixedSizePerKey(ptransform.PTransform):
+    """Sample n elements associated with each key without replacement."""
+
+    def __init__(self, n):
+      self._n = n
+
+    def expand(self, pcoll):
+      return pcoll | core.CombinePerKey(SampleCombineFn(self._n))
+
+    def display_data(self):
+      return {'n': self._n}
+
+    def default_label(self):
+      return 'FixedSizePerKey(%d)' % self._n
 
 
 @with_input_types(T)
@@ -701,6 +738,9 @@ class _CurriedFn(core.CombineFn):
 
   def extract_output(self, accumulator):
     return self.fn.extract_output(accumulator, *self.args, **self.kwargs)
+
+  def compact(self, accumulator):
+    return self.fn.compact(accumulator, *self.args, **self.kwargs)
 
   def apply(self, elements):
     return self.fn.apply(elements, *self.args, **self.kwargs)

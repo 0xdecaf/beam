@@ -17,17 +17,13 @@
  */
 package org.apache.beam.sdk.nexmark;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static org.apache.beam.sdk.nexmark.NexmarkUtils.PubSubMode.COMBINED;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
-import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -78,6 +74,8 @@ import org.apache.beam.sdk.nexmark.queries.Query8;
 import org.apache.beam.sdk.nexmark.queries.Query8Model;
 import org.apache.beam.sdk.nexmark.queries.Query9;
 import org.apache.beam.sdk.nexmark.queries.Query9Model;
+import org.apache.beam.sdk.nexmark.queries.SessionSideInputJoin;
+import org.apache.beam.sdk.nexmark.queries.SessionSideInputJoinModel;
 import org.apache.beam.sdk.nexmark.queries.sql.SqlBoundedSideInputJoin;
 import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery0;
 import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery1;
@@ -96,6 +94,10 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v20_0.com.google.common.collect.Lists;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.LongDeserializer;
@@ -1221,6 +1223,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .put(NexmarkQueryName.MONITOR_NEW_USERS, new Query8Model(configuration))
         .put(NexmarkQueryName.WINNING_BIDS, new Query9Model(configuration))
         .put(NexmarkQueryName.BOUNDED_SIDE_INPUT_JOIN, new BoundedSideInputJoinModel(configuration))
+        .put(NexmarkQueryName.SESSION_SIDE_INPUT_JOIN, new SessionSideInputJoinModel(configuration))
         .build();
   }
 
@@ -1288,6 +1291,9 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .put(
             NexmarkQueryName.BOUNDED_SIDE_INPUT_JOIN,
             new NexmarkQuery(configuration, new BoundedSideInputJoin(configuration)))
+        .put(
+            NexmarkQueryName.SESSION_SIDE_INPUT_JOIN,
+            new NexmarkQuery(configuration, new SessionSideInputJoin(configuration)))
         .build();
   }
 

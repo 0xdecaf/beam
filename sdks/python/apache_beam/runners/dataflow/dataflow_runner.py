@@ -27,11 +27,10 @@ import logging
 import threading
 import time
 import traceback
+import urllib
 from builtins import hex
 from collections import defaultdict
 
-from future.moves.urllib.parse import quote
-from future.moves.urllib.parse import unquote
 from future.utils import iteritems
 
 import apache_beam as beam
@@ -41,6 +40,7 @@ from apache_beam import pvalue
 from apache_beam.internal import pickler
 from apache_beam.internal.gcp import json_value
 from apache_beam.options.pipeline_options import DebugOptions
+from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.options.pipeline_options import TestOptions
@@ -60,6 +60,15 @@ from apache_beam.transforms.display import DisplayData
 from apache_beam.typehints import typehints
 from apache_beam.utils import proto_utils
 from apache_beam.utils.plugin import BeamPlugin
+
+try:                    # Python 3
+  unquote_to_bytes = urllib.parse.unquote_to_bytes
+  quote = urllib.parse.quote
+except AttributeError:  # Python 2
+  # pylint: disable=deprecated-urllib-function
+  unquote_to_bytes = urllib.unquote
+  quote = urllib.quote
+
 
 __all__ = ['DataflowRunner']
 
@@ -353,6 +362,25 @@ class DataflowRunner(PipelineRunner):
         experiments = list(set(experiments + debug_options.experiments))
       debug_options.experiments = experiments
 
+    # Elevate "enable_streaming_engine" to pipeline option, but using the
+    # existing experiment.
+    google_cloud_options = options.view_as(GoogleCloudOptions)
+    if google_cloud_options.enable_streaming_engine:
+      if debug_options.experiments is None:
+        debug_options.experiments = []
+      if "enable_windmill_service" not in debug_options.experiments:
+        debug_options.experiments.append("enable_windmill_service")
+      if "enable_streaming_engine" not in debug_options.experiments:
+        debug_options.experiments.append("enable_streaming_engine")
+    else:
+      if debug_options.experiments is not None:
+        if ("enable_windmill_service" in debug_options.experiments
+            or "enable_streaming_engine" in debug_options.experiments):
+          raise ValueError("""Streaming engine both disabled and enabled:
+          enableStreamingEngine is set to false, but enable_windmill_service
+          and/or enable_streaming_engine are present. It is recommended you
+          only set enableStreamingEngine.""")
+
     self.job = apiclient.Job(options, self.proto_pipeline)
 
     # Dataflow runner requires a KV type for GBK inputs, hence we enforce that
@@ -458,7 +486,7 @@ class DataflowRunner(PipelineRunner):
       window_coder = None
     from apache_beam.runners.dataflow.internal import apiclient
     use_fnapi = apiclient._use_fnapi(
-        transform_node.outputs.values()[0].pipeline._options)
+        list(transform_node.outputs.values())[0].pipeline._options)
     return self._get_typehint_based_encoding(element_type, window_coder,
                                              use_fnapi)
 
@@ -1046,7 +1074,7 @@ class DataflowRunner(PipelineRunner):
   @staticmethod
   def json_string_to_byte_array(encoded_string):
     """Implements org.apache.beam.sdk.util.StringUtils.jsonStringToByteArray."""
-    return unquote(encoded_string)
+    return unquote_to_bytes(encoded_string)
 
 
 class _DataflowSideInput(beam.pvalue.AsSideInput):
