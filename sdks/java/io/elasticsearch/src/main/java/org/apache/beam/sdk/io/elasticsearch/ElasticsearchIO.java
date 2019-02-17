@@ -17,6 +17,7 @@
  */
 package org.apache.beam.sdk.io.elasticsearch;
 
+import static org.apache.beam.sdk.io.elasticsearch.Utils.getBackendVersion;
 import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.beam.vendor.guava.v20_0.com.google.common.base.Preconditions.checkState;
 
@@ -49,9 +50,7 @@ import javax.net.ssl.SSLContext;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.BoundedSource;
-import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -59,8 +58,6 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.splittabledofn.Backlog;
-import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
@@ -167,11 +164,11 @@ public class ElasticsearchIO {
         .build();
   }
 
-  public static <ParameterT> ReadAll<ParameterT> readAll() {
+  public static ReadAll readAll() {
     // default scrollKeepalive = 5m as a majorant for un-predictable time between 2 start/read calls
     // default batchSize to 100 as recommended by ES dev team as a safe value when dealing
     // with big documents and still a good compromise for performances
-    return new AutoValue_ElasticsearchIO_ReadAll.Builder<ParameterT>()
+    return new AutoValue_ElasticsearchIO_ReadAll.Builder()
         .setWithMetadata(false)
         .setScrollKeepalive("5m")
         .setBatchSize(100L)
@@ -565,26 +562,15 @@ public class ElasticsearchIO {
       // return input
       //         .apply(org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null, null, null)));
 
-      if (getQuery() == null) {
-        return input
-            .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
-            .apply(
-                ElasticsearchIO.<Void>readAll()
-                    .withConnectionConfiguration(getConnectionConfiguration())
-                    .withBatchSize(getBatchSize())
-                    .withMetadata(isWithMetadata())
-                    .withScrollKeepalive(getScrollKeepalive()));
-      } else {
-        return input
-            .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
-            .apply(
-                ElasticsearchIO.<Void>readAll()
-                    .withConnectionConfiguration(getConnectionConfiguration())
-                    .withQuery(getQuery())
-                    .withBatchSize(getBatchSize())
-                    .withMetadata(isWithMetadata())
-                    .withScrollKeepalive(getScrollKeepalive()));
-      }
+      // Once SDF support is ubiquitous the following can be used to deprecate the Source API implementation.
+      return input
+          .apply(Create.of(getQuery()).withCoder(StringUtf8Coder.of()))
+          .apply(ElasticsearchIO.<Void>readAll()
+              .withConnectionConfiguration(getConnectionConfiguration())
+              .withBatchSize(getBatchSize())
+              .withMetadata(isWithMetadata())
+              .withScrollKeepalive(getScrollKeepalive()));
+
     }
 
     @Override
@@ -598,31 +584,15 @@ public class ElasticsearchIO {
     }
   }
 
-  /**
-   * Defines a callback which allows the user to update the query for each incoming element.
-   *
-   * @param <ParameterT>
-   */
-  @FunctionalInterface
-  public interface QueryPreparator<ParameterT> extends Serializable {
-    String prepare(ParameterT element, String query);
-  }
-
   /** A {@link PTransform} reading data from Elasticsearch. */
   @AutoValue
-  public abstract static class ReadAll<ParameterT>
-      extends PTransform<PCollection<ParameterT>, PCollection<String>> {
+  public abstract static class ReadAll
+      extends PTransform<PCollection<String>, PCollection<String>> {
 
     private static final long MAX_BATCH_SIZE = 10000L;
 
     @Nullable
     abstract ConnectionConfiguration getConnectionConfiguration();
-
-    @Nullable
-    abstract String getQuery();
-
-    @Nullable
-    abstract QueryPreparator<ParameterT> getQueryPreparator();
 
     abstract boolean isWithMetadata();
 
@@ -630,24 +600,20 @@ public class ElasticsearchIO {
 
     abstract long getBatchSize();
 
-    abstract Builder<ParameterT> builder();
+    abstract Builder builder();
 
     @AutoValue.Builder
-    abstract static class Builder<ParameterT> {
-      abstract Builder<ParameterT> setConnectionConfiguration(
+    abstract static class Builder{
+      abstract Builder setConnectionConfiguration(
           ConnectionConfiguration connectionConfiguration);
 
-      abstract Builder<ParameterT> setQuery(String query);
+      abstract Builder setWithMetadata(boolean withMetadata);
 
-      abstract Builder<ParameterT> setQueryPreparator(QueryPreparator<ParameterT> preparator);
+      abstract Builder setScrollKeepalive(String scrollKeepalive);
 
-      abstract Builder<ParameterT> setWithMetadata(boolean withMetadata);
+      abstract Builder setBatchSize(long batchSize);
 
-      abstract Builder<ParameterT> setScrollKeepalive(String scrollKeepalive);
-
-      abstract Builder<ParameterT> setBatchSize(long batchSize);
-
-      abstract ReadAll<ParameterT> build();
+      abstract ReadAll build();
     }
 
     /**
@@ -657,35 +623,10 @@ public class ElasticsearchIO {
      *     configuration to Elasticsearch.
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll<ParameterT> withConnectionConfiguration(
+    public ReadAll withConnectionConfiguration(
         ConnectionConfiguration connectionConfiguration) {
       checkArgument(connectionConfiguration != null, "connectionConfiguration can not be null");
       return builder().setConnectionConfiguration(connectionConfiguration).build();
-    }
-
-    /**
-     * Provide a query used while reading from Elasticsearch.
-     *
-     * @param query the query. See <a
-     *     href="https://www.elastic.co/guide/en/elasticsearch/reference/2.4/query-dsl.html">Query
-     *     DSL</a>
-     * @return a {@link PTransform} reading data from Elasticsearch.
-     */
-    public ReadAll<ParameterT> withQuery(String query) {
-      checkArgument(query != null, "query can not be null");
-      checkArgument(!query.isEmpty(), "query can not be empty");
-      return builder().setQuery(query).build();
-    }
-
-    /**
-     * Provide a function used to transform incoming elements into queries.
-     *
-     * @param preparator the transforming function.
-     * @return a {@link PTransform} reading data from Elasticsearch.
-     */
-    public ReadAll<ParameterT> withQueryPreparator(QueryPreparator<ParameterT> preparator) {
-      checkArgument(preparator != null, "preparator can not be null");
-      return builder().setQueryPreparator(preparator).build();
     }
 
     /**
@@ -693,7 +634,7 @@ public class ElasticsearchIO {
      *
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll<ParameterT> withMetadata() {
+    public ReadAll withMetadata() {
       return builder().setWithMetadata(true).build();
     }
 
@@ -703,7 +644,7 @@ public class ElasticsearchIO {
      * @param metadata should document metadata be returned with results
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll<ParameterT> withMetadata(boolean metadata) {
+    public ReadAll withMetadata(boolean metadata) {
       return builder().setWithMetadata(metadata).build();
     }
 
@@ -715,7 +656,7 @@ public class ElasticsearchIO {
      * @param scrollKeepalive keepalive duration of the scroll
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll<ParameterT> withScrollKeepalive(String scrollKeepalive) {
+    public ReadAll withScrollKeepalive(String scrollKeepalive) {
       checkArgument(scrollKeepalive != null, "scrollKeepalive can not be null");
       checkArgument(!"0m".equals(scrollKeepalive), "scrollKeepalive can not be 0m");
       return builder().setScrollKeepalive(scrollKeepalive).build();
@@ -731,7 +672,7 @@ public class ElasticsearchIO {
      * @param batchSize number of documents read in each scroll read
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll<ParameterT> withBatchSize(long batchSize) {
+    public ReadAll withBatchSize(long batchSize) {
       checkArgument(
           batchSize > 0 && batchSize <= MAX_BATCH_SIZE,
           "batchSize must be > 0 and <= %s, but was: %s",
@@ -741,20 +682,18 @@ public class ElasticsearchIO {
     }
 
     @Override
-    public PCollection<String> expand(PCollection<ParameterT> input) {
+    public PCollection<String> expand(PCollection<String> input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
 
       return input
           .apply(
               ParDo.of(
-                  new ElasticsearchReadFn<>(
+                  new ElasticsearchReadSplittableDoFn(
                       this.getConnectionConfiguration(),
-                      this.getQuery(),
                       this.isWithMetadata(),
                       this.getBatchSize(),
                       this.getScrollKeepalive(),
-                      this.getQueryPreparator(),
                       null,
                       null)))
           .setCoder(StringUtf8Coder.of());
@@ -763,329 +702,10 @@ public class ElasticsearchIO {
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
-      builder.addIfNotNull(DisplayData.item("query", getQuery()));
       builder.addIfNotNull(DisplayData.item("withMetadata", isWithMetadata()));
       builder.addIfNotNull(DisplayData.item("batchSize", getBatchSize()));
       builder.addIfNotNull(DisplayData.item("scrollKeepalive", getScrollKeepalive()));
       getConnectionConfiguration().populateDisplayData(builder);
-    }
-  }
-
-  @DoFn.BoundedPerElement
-  private static class ElasticsearchReadFn<ParameterT> extends DoFn<ParameterT, String> {
-    private final ConnectionConfiguration connectionConfiguration;
-    private final String queryTemplate;
-    private final boolean isWithMetadata;
-    private final long batchSize;
-    private final String scrollKeepalive;
-    private final QueryPreparator<ParameterT> preparator;
-
-    @Nullable private final String shardPreference;
-    @Nullable private Integer numSlices;
-
-    /* Because we can be scrolling over a long period of time then the scrollId needs to be resilient.
-     * With Elasticsearch, you can't use the same scrollId multiple times and get the same result set [1].
-     * If we keep track of the scrollId and the total number of records that have been output for the slice,
-     * it would be possible to recover state and restart output from where it left off by skipping the number of
-     * records that have succeeded, however that might not be a good strategy.
-     *
-     * Problem: While iterating through the scroll for the slice there could be a failure.  If it's possible to request the
-     * results again then we can just keep the last scrollId for the slice in @StateId("scrollPerSlice")
-     *
-     *
-     * TODO: Determine how to observe that a scrollId has been re-used (Likely the case of a node failure)
-     * TODO: Determine the best way to "skip" in the case of a stale scrollId
-     *
-     * [1] https://discuss.elastic.co/t/do-unique-reusable--scroll-ids-exist/12280/3
-     */
-
-    private transient RestClient restClient;
-
-    private transient String scrollId;
-
-    private transient int backendVersion;
-
-    private ElasticsearchReadFn(
-        ConnectionConfiguration connectionConfiguration,
-        String query,
-        boolean isWithMetadata,
-        long batchSize,
-        String scrollKeepalive,
-        QueryPreparator<ParameterT> preparator,
-        @Nullable String shardPreference,
-        @Nullable Integer numSlices) {
-
-      this.connectionConfiguration = connectionConfiguration;
-      this.queryTemplate = query;
-      this.preparator = preparator;
-      this.isWithMetadata = isWithMetadata;
-      this.batchSize = batchSize;
-      this.scrollKeepalive = scrollKeepalive;
-
-      this.shardPreference = shardPreference;
-      this.numSlices = numSlices;
-    }
-
-    private String getPreparedQuery(ProcessContext c, @Nullable Long sliceId) {
-      String query =
-          preparator == null ? queryTemplate : preparator.prepare(c.element(), queryTemplate);
-      if (query == null) {
-        query = "{\"query\": { \"match_all\": {} }}";
-      }
-
-      if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1 && sliceId != null) {
-        //if there is more than one slice, add the slice to the user query
-        String sliceQuery =
-            String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
-        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
-      }
-
-      return query;
-    }
-
-    //@ProcessElement
-    public void processElement(ProcessContext c) throws IOException {
-      /*
-      We can either compose one DoFn per slice and join them (if order doesn't matter and it shouldn't)
-      and if we do that, the sliceId will be passed in, otherwise the SplittableDoFn is best.
-       */
-      // We can use slices if > v5 for parallelization otherwise don't worry about it at all.
-      String query = getPreparedQuery(c, null);
-//      if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1) {
-//        //if there is more than one slice, add the slice to the user query
-//        String sliceQuery =
-//            String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
-//        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
-//      }
-
-      JsonNode searchResult = executeSearchQuery(query);
-
-      updateScrollId(searchResult);
-      while (outputResults(c, searchResult) > 0) {
-        searchResult = advance();
-      }
-    }
-
-    private static JsonNode getStats(
-        ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
-      HashMap<String, String> params = new HashMap<>();
-      if (shardLevel) {
-        params.put("level", "shards");
-      }
-      String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
-      try (RestClient restClient = connectionConfiguration.createClient()) {
-        return parseResponse(restClient.performRequest("GET", endpoint, params).getEntity());
-      }
-    }
-
-    private static int getShardCount(ConnectionConfiguration connectionConfiguration) throws IOException {
-
-      JsonNode statsJson = getStats(connectionConfiguration, true);
-      JsonNode shardsJson =
-          statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
-
-      //numSlices = Iterators.size(shardsJson.elements());
-      // A hack to temporarily get around an issue with google commons not available by vendored package.
-      int numSlices = 0;
-      Iterator<?> e = shardsJson.elements();
-      while(e.hasNext() && e.next() != null)
-        numSlices += 1;
-
-      return numSlices;
-    }
-
-    @GetInitialRestriction
-    public OffsetRange getInitialRange(ParameterT element) throws IOException {
-      /* The range is the number of slices which will default to tne number of shards in the target index.
-       *
-       * Maybe we can keep track of the number of records and shard count once we make the first query.
-       * That all said, we're using a long running cursor for the processing of elements
-       * and we want to ensure that the output doesn't create a hot bundle(window,key)
-       * Each incoming query can be sent to a different worker.
-       *
-       */
-      // There can be only one worker pulling data concurrently with Elasticsearch <5 so there is only one
-      if (backendVersion < 5) {
-        return new OffsetRange(0L, 1L);
-      }
-      return new OffsetRange(0L, numSlices);
-    }
-
-    @SplitRestriction
-    public void splitRestriction(ParameterT element, OffsetRange restriction, Backlog backlog, OutputReceiver<OffsetRange> receiver) {
-      // Statically split into a restriction representing a single shard and another for the rest.
-      // If we output one restriction per shard and the amount of data is very small we could create
-      // more connections than needed to Elasticsearch.
-
-      // This allows the runner to split the restriction further if there are a lot of results.
-
-      LOG.info("splitRestriction({}, {})", restriction, backlog);
-
-      LOG.info("\t Outputting Restriction -> {}", new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
-      receiver.output(new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
-
-      if (restriction.getTo() - restriction.getFrom() > 1) {
-        LOG.info("\t Outputting Restriction -> {}", new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
-        receiver.output(new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
-      }
-    }
-
-    @ProcessElement
-    public ProcessContinuation processElementSplittable(
-            ProcessContext c,
-            OffsetRangeTracker tracker
-    ) throws IOException {
-
-      LOG.info("Processing OffsetRangeTracker: {}", tracker);
-      // Elasticsearch supports parallelism of requests based on a concept called slices.
-      // Slicing can be done in parallel, scrolling must be done in serial for each slice.
-
-      if(tracker.currentRestriction().getFrom() == tracker.currentRestriction().getTo()) {
-        // This is a weird edge case because when the shards are < 4 we get called with
-        // OffsetRangeTracker{range=[1, 1) which should never happen.
-        // If we call tryClaim it seems to fix the state machine within the DirectRunner.
-        // Need to identify if this will do something else
-        if(tracker.tryClaim(tracker.currentRestriction().getFrom())) {
-          LOG.info("Tried claiming the first item and it succeeded....");
-        }
-        return ProcessContinuation.stop();
-      }
-
-      for (long sliceId = tracker.currentRestriction().getFrom();
-           sliceId < tracker.currentRestriction().getTo();
-           ++sliceId) {
-
-        // Cleanup any existing scroll state.
-        deleteScroll();
-
-        if(!tracker.tryClaim(sliceId)) {
-          LOG.info("Failed to claim {}", sliceId);
-          break;
-        }
-        LOG.info("Successfully Claimed: {}", sliceId);
-
-        String query = getPreparedQuery(c, sliceId);
-
-//        JsonNode searchResult = this.executeQueryOrAdvance(query);
-//        while(outputResults(c, searchResult)){
-//          searchResult = this.executeQueryOrAdvance(query);
-//        }
-
-        long i, outputCount = 0;
-        do {
-          JsonNode searchResult = this.executeQueryOrAdvance(query);
-
-          int totalCount = searchResult.path("hits").path("total").asInt();
-
-          // TODO: Determine if it's safe to store state locally (State API) that keeps the scrollId and return ProcessContinuation.resume()
-          // This will help with worker failures that occur while processing a specific page.
-          // If we were to do this, we would only want to update the scroll state after the result page is output.
-          // That means outputResults should own updating the scroll state and the executeOrAdvance would just retrieve it.
-          i = outputResults(c, searchResult);
-          outputCount += i;
-          LOG.info("Element: {} Shard: {} Total: {}/{} Last Page: {} ", c.element(), sliceId, outputCount, totalCount, i);
-        } while (i > 0);
-
-        /* TODO: Determine the best course of action here.
-           Should we just blindly loop and see if the runner splits the restriction?
-         */
-        LOG.info("Completed outputting results of offset: {}", sliceId);
-      }
-      // Processing for the restriction has completed so
-      LOG.info("Completed processing {}: {} Returning ProcessContinuation.stop()", c.element(), tracker);
-      return ProcessContinuation.stop();
-    }
-
-    private void updateScrollId(JsonNode searchResult) {
-      scrollId = searchResult.path("_scroll_id").asText();
-    }
-
-    private JsonNode executeSearchQuery(String query) throws IOException {
-
-      String endPoint =
-          String.format(
-              "/%s/%s/_search",
-              connectionConfiguration.getIndex(), connectionConfiguration.getType());
-
-      Map<String, String> params = new HashMap<>();
-      params.put("scroll", scrollKeepalive);
-      params.put("size", String.valueOf(batchSize));
-      if (backendVersion == 2 && shardPreference != null) {
-        params.put("preference", "_shards:" + shardPreference);
-      }
-
-      LOG.info("Executing: {}\n With Parameters: {}", query, params);
-      HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
-      Response response = restClient.performRequest("GET", endPoint, params, queryEntity);
-      return parseResponse(response.getEntity());
-    }
-
-    private JsonNode advance() throws IOException {
-
-      String requestBody =
-              String.format("{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}", scrollKeepalive, scrollId);
-      HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-      Response response =
-              restClient.performRequest("GET", "/_search/scroll", Collections.emptyMap(), scrollEntity);
-      return parseResponse(response.getEntity());
-    }
-
-    private JsonNode executeQueryOrAdvance(String query) throws IOException {
-      JsonNode result = scrollId == null ? executeSearchQuery(query) : advance();
-      updateScrollId(result);
-      return result;
-    }
-
-    private int outputResults(ProcessContext c, JsonNode searchResult) {
-      JsonNode hits = searchResult.path("hits").path("hits");
-
-      for (JsonNode hit : hits) {
-        if (isWithMetadata) {
-          c.output(hit.toString());
-        } else {
-          c.output(hit.path("_source").toString());
-        }
-      }
-      updateScrollId(searchResult);
-      return hits.size();
-    }
-
-    @Setup
-    public void setup() throws IOException {
-      restClient = connectionConfiguration.createClient();
-      backendVersion = getBackendVersion(connectionConfiguration);
-
-      // We can only use slices if the backend version is >=5
-      if (backendVersion >= 5 && this.numSlices == null) {
-        // BUG: When working with the same number of slices as shards some tests aren't succeeding.
-        // Tests work when numSlices == 1
-        // If numslices == 3 the third shard is never retrieved.
-        // TODO: This is an artificial limit, should it exist?
-        numSlices = Math.max(getShardCount(connectionConfiguration), 8);
-      }
-    }
-
-    @Teardown
-    public void teardown() throws IOException {
-      deleteScroll();
-
-      if (restClient != null) {
-        restClient.close();
-      }
-    }
-
-    private void deleteScroll() {
-      // remove the scroll
-      if (scrollId == null)
-        return;
-
-      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
-      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-
-      try {
-        restClient.performRequest("DELETE", "/_search/scroll", Collections.emptyMap(), entity);
-      } catch (IOException ignore) { }
-      scrollId = null;
     }
   }
 
@@ -1851,22 +1471,4 @@ public class ElasticsearchIO {
     }
   }
 
-  static int getBackendVersion(ConnectionConfiguration connectionConfiguration) {
-    try (RestClient restClient = connectionConfiguration.createClient()) {
-      Response response = restClient.performRequest("GET", "");
-      JsonNode jsonNode = parseResponse(response.getEntity());
-      int backendVersion =
-          Integer.parseInt(jsonNode.path("version").path("number").asText().substring(0, 1));
-      checkArgument(
-          (backendVersion == 2 || backendVersion == 5 || backendVersion == 6),
-          "The Elasticsearch version to connect to is %s.x. "
-              + "This version of the ElasticsearchIO is only compatible with "
-              + "Elasticsearch v6.x, v5.x and v2.x",
-          backendVersion);
-      return backendVersion;
-
-    } catch (IOException e) {
-      throw new IllegalArgumentException("Cannot get Elasticsearch version", e);
-    }
-  }
 }
