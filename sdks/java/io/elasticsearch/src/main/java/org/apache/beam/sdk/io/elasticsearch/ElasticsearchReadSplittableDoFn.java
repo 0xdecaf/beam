@@ -1,6 +1,31 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.beam.sdk.io.elasticsearch;
 
+import static org.apache.beam.sdk.io.elasticsearch.Utils.getBackendVersion;
+import static org.apache.beam.sdk.io.elasticsearch.Utils.parseResponse;
+
 import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.ConnectionConfiguration;
 import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -15,15 +40,6 @@ import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nullable;
-import java.io.IOException;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-
-import static org.apache.beam.sdk.io.elasticsearch.Utils.getBackendVersion;
-import static org.apache.beam.sdk.io.elasticsearch.Utils.parseResponse;
 
 @BoundedPerElement
 class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
@@ -78,10 +94,12 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
       query = "{\"query\": { \"match_all\": {} }}";
     }
 
-    if ((backendVersion == 5 || backendVersion == 6) && numSlices != null && numSlices > 1 && sliceId != null) {
-      //if there is more than one slice, add the slice to the user query
-      String sliceQuery =
-          String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
+    if ((backendVersion == 5 || backendVersion == 6)
+        && numSlices != null
+        && numSlices > 1
+        && sliceId != null) {
+      // If there is more than one slice, add the slice to the user query
+      String sliceQuery = String.format("\"slice\": {\"id\": %s,\"max\": %s}", sliceId, numSlices);
       query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
     }
 
@@ -89,7 +107,8 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
   }
 
   private static JsonNode getStats(
-      ElasticsearchIO.ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+      ElasticsearchIO.ConnectionConfiguration connectionConfiguration, boolean shardLevel)
+      throws IOException {
     HashMap<String, String> params = new HashMap<>();
     if (shardLevel) {
       params.put("level", "shards");
@@ -100,20 +119,22 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
     }
   }
 
-  private static int getShardCount(ConnectionConfiguration connectionConfiguration) throws IOException {
+  private static int getShardCount(ConnectionConfiguration connectionConfiguration)
+      throws IOException {
 
     JsonNode statsJson = getStats(connectionConfiguration, true);
     JsonNode shardsJson =
         statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
 
     return Iterators.size(shardsJson.elements());
-    // A hack to temporarily get around an issue with google commons not available by vendored package.
-//    int numSlices = 0;
-//    Iterator<?> e = shardsJson.elements();
-//    while(e.hasNext() && e.next() != null)
-//      numSlices += 1;
-//
-//    return numSlices;
+    // A hack to temporarily get around an issue with google commons not available by vendored
+    // package.
+    //  int numSlices = 0;
+    //  Iterator<?> e = shardsJson.elements();
+    //  while(e.hasNext() && e.next() != null)
+    //    numSlices += 1;
+    //
+    // return numSlices;
   }
 
   @GetInitialRestriction
@@ -126,7 +147,7 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
      * Each incoming query can be sent to a different worker.
      *
      */
-    // There can be only one worker pulling data concurrently with Elasticsearch <5 so there is only one
+    // There can be only one worker pulling data concurrently with Elasticsearch <5
     if (backendVersion < 5) {
       return new OffsetRange(0L, 1L);
     }
@@ -134,50 +155,56 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
   }
 
   @SplitRestriction
-  public void splitRestriction(String element, OffsetRange restriction, Backlog backlog, OutputReceiver<OffsetRange> receiver) {
+  public void splitRestriction(
+      String element,
+      OffsetRange restriction,
+      OutputReceiver<OffsetRange> receiver) {
     // Statically split into a restriction representing a single shard and another for the rest.
     // If we output one restriction per shard and the amount of data is very small we could create
     // more connections than needed to Elasticsearch.
 
     // This allows the runner to split the restriction further if there are a lot of results.
 
-    LOG.debug("splitRestriction({}, {})", restriction, backlog);
-
-    LOG.debug("\t Outputting Restriction -> {}", new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
+    LOG.debug(
+        "\t Outputting Restriction -> {}",
+        new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
     receiver.output(new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
 
     if (restriction.getTo() - restriction.getFrom() > 1) {
-      LOG.debug("\t Outputting Restriction -> {}", new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
+      LOG.debug(
+          "\t Outputting Restriction -> {}",
+          new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
       receiver.output(new OffsetRange(restriction.getFrom() + 1, restriction.getTo()));
     }
   }
 
   @ProcessElement
-  public ProcessContinuation processElement(ProcessContext c, OffsetRangeTracker tracker) throws IOException {
+  public ProcessContinuation processElement(ProcessContext c, OffsetRangeTracker tracker)
+      throws IOException {
 
     LOG.debug("Processing OffsetRangeTracker: {}", tracker);
     // Elasticsearch supports parallelism of requests based on a concept called slices.
     // Slicing can be done in parallel, scrolling must be done in serial for each slice.
 
-    if(tracker.currentRestriction().getFrom() == tracker.currentRestriction().getTo()) {
+    if (tracker.currentRestriction().getFrom() == tracker.currentRestriction().getTo()) {
       // This is a weird edge case because when the shards are < 4 we get called with
       // OffsetRangeTracker{range=[1, 1) which should never happen.
       // If we call tryClaim it seems to fix the state machine within the DirectRunner.
       // Need to identify if this will do something else
-      if(tracker.tryClaim(tracker.currentRestriction().getFrom())) {
+      if (tracker.tryClaim(tracker.currentRestriction().getFrom())) {
         LOG.debug("Tried claiming the first item and it succeeded....");
       }
       return ProcessContinuation.stop();
     }
 
     for (long sliceId = tracker.currentRestriction().getFrom();
-         sliceId < tracker.currentRestriction().getTo();
-         ++sliceId) {
+        sliceId < tracker.currentRestriction().getTo();
+        ++sliceId) {
 
       // Cleanup any existing scroll state.
       deleteScroll();
 
-      if(!tracker.tryClaim(sliceId)) {
+      if (!tracker.tryClaim(sliceId)) {
         LOG.debug("Failed to claim {}", sliceId);
         break;
       }
@@ -193,34 +220,43 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
 
         outputCount += i;
 
-        if(LOG.isDebugEnabled()) { // TODO: Look into Source Metrics
+        if (LOG.isDebugEnabled()) { // TODO: Look into Source Metrics
           int totalCount = searchResult.path("hits").path("total").asInt();
-          LOG.debug("Element: {} Shard: {} Total: {}/{} Last Page: {} ", c.element(), sliceId, outputCount, totalCount, i);
+          LOG.debug(
+              "Element: {} Shard: {} Total: {}/{} Last Page: {} ",
+              c.element(),
+              sliceId,
+              outputCount,
+              totalCount,
+              i);
         }
 
       } while (i > 0);
 
-        /* TODO: Determine the best course of action here.
-           Should we just blindly loop and see if the runner splits the restriction or return ProcessContinuation.resume()?
-           The right answer is likely predicated on whether tryClaim should be called before or after work has been done.
-         */
+      /* TODO: Determine the best course of action here.
+        Should we just blindly loop and see if the runner splits the restriction or return ProcessContinuation.resume()?
+        The right answer is likely predicated on whether tryClaim should be called before or after work has been done.
+      */
       LOG.debug("Completed outputting results of offset: {}", sliceId);
     }
-    LOG.debug("Completed processing {}: {} Returning ProcessContinuation.stop()", c.element(), tracker);
+    LOG.debug(
+        "Completed processing {}: {} Returning ProcessContinuation.stop()", c.element(), tracker);
     return ProcessContinuation.stop();
   }
 
   private void deleteScroll() {
     // remove the scroll
-    if (scrollId == null)
+    if (scrollId == null) {
       return;
+    }
 
     String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
     HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
 
     try {
       restClient.performRequest("DELETE", "/_search/scroll", Collections.emptyMap(), entity);
-    } catch (IOException ignore) { }
+    } catch (IOException ignore) {
+    }
     scrollId = null;
   }
 
@@ -301,7 +337,4 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
       restClient.close();
     }
   }
-
-
 }
-

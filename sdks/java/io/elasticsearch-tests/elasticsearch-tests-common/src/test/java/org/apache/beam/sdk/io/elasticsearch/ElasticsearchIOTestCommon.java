@@ -45,6 +45,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.RetryConfiguration.DefaultRetryPredicate;
 import org.apache.beam.sdk.io.elasticsearch.ElasticsearchIO.RetryConfiguration.RetryPredicate;
@@ -53,11 +55,9 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.transforms.Count;
-import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.transforms.DoFnTester;
-import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.http.HttpEntity;
 import org.apache.http.entity.ContentType;
 import org.apache.http.nio.entity.NStringEntity;
@@ -211,18 +211,18 @@ class ElasticsearchIOTestCommon implements Serializable {
 
     PCollection<String> output =
       pipeline
-          .apply(Create.of("Einstein" , "Darwin"))
+          .apply(Create.of("Einstein" , "Darwin")
+              .withCoder(StringUtf8Coder.of()))
+          .apply(MapElements
+              .into(TypeDescriptors.strings())
+              .via(input -> queryTemplate.replace("${scientist}", input)))
           .apply(
-              ElasticsearchIO.<String>readAll() // Why do we need to specify the input element type?
+              ElasticsearchIO.readAll()
                 .withConnectionConfiguration(connectionConfiguration)
                 //set to default value, useful just to test parameter passing.
                 .withScrollKeepalive("5m")
                 //set to default value, useful just to test parameter passing.
                 .withBatchSize(100L)
-                .withQuery(queryTemplate)
-                .withQueryPreparator((ElasticsearchIO.QueryPreparator<String>) (element, query) ->
-                    query.replace("${scientist}", element)
-                )
           );
 
     PAssert.thatSingleton(output.apply("Count", Count.globally()))

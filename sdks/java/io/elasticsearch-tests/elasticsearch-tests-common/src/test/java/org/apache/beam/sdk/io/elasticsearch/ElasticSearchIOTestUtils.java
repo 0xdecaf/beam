@@ -120,7 +120,7 @@ class ElasticSearchIOTestUtils {
         restClient.performRequest(
             "POST", endPoint, Collections.singletonMap("refresh", "wait_for"), requestBody);
     ElasticsearchIO.checkForErrors(
-        response.getEntity(), ElasticsearchIO.getBackendVersion(connectionConfiguration));
+        response.getEntity(), Utils.getBackendVersion(connectionConfiguration));
   }
 
   /**

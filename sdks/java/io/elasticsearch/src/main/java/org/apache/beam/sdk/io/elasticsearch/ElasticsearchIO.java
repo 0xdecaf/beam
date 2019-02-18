@@ -560,17 +560,19 @@ public class ElasticsearchIO {
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
 
       // return input
-      //         .apply(org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null, null, null)));
+      //         .apply(org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null,
+      // null, null)));
 
-      // Once SDF support is ubiquitous the following can be used to deprecate the Source API implementation.
+      // Once SDF support is ubiquitous the following can be used to deprecate the Source API
+      // implementation.
       return input
-          .apply(Create.of(getQuery()).withCoder(StringUtf8Coder.of()))
-          .apply(ElasticsearchIO.<Void>readAll()
-              .withConnectionConfiguration(getConnectionConfiguration())
-              .withBatchSize(getBatchSize())
-              .withMetadata(isWithMetadata())
-              .withScrollKeepalive(getScrollKeepalive()));
-
+          .apply(Create.of(getQuery()))
+          .apply(
+              ElasticsearchIO.readAll()
+                  .withConnectionConfiguration(getConnectionConfiguration())
+                  .withBatchSize(getBatchSize())
+                  .withMetadata(isWithMetadata())
+                  .withScrollKeepalive(getScrollKeepalive()));
     }
 
     @Override
@@ -603,9 +605,8 @@ public class ElasticsearchIO {
     abstract Builder builder();
 
     @AutoValue.Builder
-    abstract static class Builder{
-      abstract Builder setConnectionConfiguration(
-          ConnectionConfiguration connectionConfiguration);
+    abstract static class Builder {
+      abstract Builder setConnectionConfiguration(ConnectionConfiguration connectionConfiguration);
 
       abstract Builder setWithMetadata(boolean withMetadata);
 
@@ -623,8 +624,7 @@ public class ElasticsearchIO {
      *     configuration to Elasticsearch.
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
-    public ReadAll withConnectionConfiguration(
-        ConnectionConfiguration connectionConfiguration) {
+    public ReadAll withConnectionConfiguration(ConnectionConfiguration connectionConfiguration) {
       checkArgument(connectionConfiguration != null, "connectionConfiguration can not be null");
       return builder().setConnectionConfiguration(connectionConfiguration).build();
     }
@@ -1470,5 +1470,4 @@ public class ElasticsearchIO {
       }
     }
   }
-
 }
