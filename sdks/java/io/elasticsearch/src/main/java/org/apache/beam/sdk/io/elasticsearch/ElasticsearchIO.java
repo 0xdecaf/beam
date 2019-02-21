@@ -602,6 +602,12 @@ public class ElasticsearchIO {
 
     abstract long getBatchSize();
 
+    @Nullable
+    abstract Integer getNumSlices();
+
+    @Nullable
+    abstract Integer getMaxSlices();
+
     abstract Builder builder();
 
     @AutoValue.Builder
@@ -613,6 +619,10 @@ public class ElasticsearchIO {
       abstract Builder setScrollKeepalive(String scrollKeepalive);
 
       abstract Builder setBatchSize(long batchSize);
+
+      abstract Builder setNumSlices(Integer numSlices);
+
+      abstract Builder setMaxSlices(Integer maxSlices);
 
       abstract ReadAll build();
     }
@@ -681,6 +691,27 @@ public class ElasticsearchIO {
       return builder().setBatchSize(batchSize).build();
     }
 
+    /**
+     * Explicitly sets the number of slices to use allowing the user to control parallelism.  This overrides automatic
+     * slice determination.
+     * @param slices number of slices to use when querying Elasticsearch
+     * @return a {@link PTransform} reading data from Elasticsearch.
+     */
+    public ReadAll withNumSlices(Integer slices) {
+      checkArgument(slices > 1, "slices must be > 0, but was: %s", slices);
+      return builder().setNumSlices(slices).build();
+    }
+
+    /**
+     * Provide an upper limit to the number of slices to use when automatically determining optimal number of slices.
+     * @param slices maximum number of slices allowed
+     * @return a {@link PTransform} reading data from Elasticsearch.
+     */
+    public ReadAll withMaxSlices(Integer slices) {
+      checkArgument(slices > 1, "slices must be > 0, but was: %s", slices);
+      return builder().setMaxSlices(slices).build();
+    }
+
     @Override
     public PCollection<String> expand(PCollection<String> input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
@@ -695,7 +726,8 @@ public class ElasticsearchIO {
                       this.getBatchSize(),
                       this.getScrollKeepalive(),
                       null,
-                      null)))
+                      this.getNumSlices(),
+                      this.getMaxSlices())))
           .setCoder(StringUtf8Coder.of());
     }
 

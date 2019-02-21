@@ -211,12 +211,12 @@ class ElasticsearchIOTestCommon implements Serializable {
 
     PCollection<String> output =
       pipeline
-          .apply(Create.of("Einstein" , "Darwin")
+          .apply("Create Example Elements", Create.of("Einstein" , "Darwin")
               .withCoder(StringUtf8Coder.of()))
-          .apply(MapElements
+          .apply("Transform into Elasticsearch Query", MapElements
               .into(TypeDescriptors.strings())
               .via(input -> queryTemplate.replace("${scientist}", input)))
-          .apply(
+          .apply("Execute Queries",
               ElasticsearchIO.readAll()
                 .withConnectionConfiguration(connectionConfiguration)
                 //set to default value, useful just to test parameter passing.
@@ -227,6 +227,27 @@ class ElasticsearchIOTestCommon implements Serializable {
 
     PAssert.thatSingleton(output.apply("Count", Count.globally()))
         .isEqualTo((numDocs/NUM_SCIENTISTS) * 2);
+    pipeline.run();
+  }
+
+  void testReadAllWithSlices() throws Exception {
+    if (!useAsITests) {
+      ElasticSearchIOTestUtils.insertTestDocuments(connectionConfiguration, numDocs, restClient);
+    }
+    PCollection<String> output =
+        pipeline
+            .apply(
+                Create.of("")
+                    .withCoder(StringUtf8Coder.of()))
+            .apply(
+                ElasticsearchIO.readAll()
+                    .withConnectionConfiguration(connectionConfiguration)
+                    //set batch size to one in order to ensure scrolling capabilities are working.
+                    .withBatchSize(numDocs / 4 / 3) // Three pages per slice if documents are evenly distributed
+                                                    // across shards
+                    .withNumSlices(4)
+            );
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(numDocs);
     pipeline.run();
   }
 

@@ -134,12 +134,6 @@ public class ElasticsearchIOTest implements Serializable {
   }
 
   @Test
-  public void testReadAll() throws Exception {
-    elasticsearchIOTestCommon.setPipeline(pipeline);
-    elasticsearchIOTestCommon.testReadAll();
-  }
-
-  @Test
   public void testIntervalWindow_GetCoder_protobuf_failure() throws Exception {
 
     IntervalWindow.IntervalWindowCoder coder = new IntervalWindow.IntervalWindowCoder();
@@ -153,6 +147,18 @@ public class ElasticsearchIOTest implements Serializable {
   public void testReadWithQuery() throws Exception {
     elasticsearchIOTestCommon.setPipeline(pipeline);
     elasticsearchIOTestCommon.testReadWithQuery();
+  }
+
+  @Test
+  public void testReadAll() throws Exception {
+    elasticsearchIOTestCommon.setPipeline(pipeline);
+    elasticsearchIOTestCommon.testReadAll();
+  }
+
+  @Test
+  public void testReadAllWithSlices() throws Exception {
+    elasticsearchIOTestCommon.setPipeline(pipeline);
+    elasticsearchIOTestCommon.testReadAllWithSlices();
   }
 
   @Test
