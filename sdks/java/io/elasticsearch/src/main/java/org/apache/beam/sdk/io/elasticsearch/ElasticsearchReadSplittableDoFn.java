@@ -154,7 +154,7 @@ class ElasticsearchReadSplittableDoFn extends DoFn<String, String> {
     long elements = restriction.getTo() - restriction.getFrom();
 
     // Attempt to split the restriction in half
-    restriction.split(elements / 2, 1).forEach(receiver::output);
+    restriction.split((int)Math.ceil((double)elements / 2), 1).forEach(receiver::output);
   }
 
   @ProcessElement
